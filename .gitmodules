@@ -1,0 +1,16 @@
+[submodule "kernel"]
+	path = kernel
+	url = https://github.com/scopedog/mdraid.git
+	branch = main
+[submodule "md-kmec"]
+	path = md-kmec
+	url = https://github.com/scopedog/md-kmec.git
+	branch = main
+[submodule "mdadm"]
+	path = mdadm
+	url = https://github.com/scopedog/mdadm.git
+	branch = raidkm-level71
+[submodule "lvm2"]
+	path = lvm2
+	url = https://github.com/scopedog/lvm2.git
+	branch = raidkm

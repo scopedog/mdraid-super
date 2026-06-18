@@ -1,0 +1,161 @@
+# mdraid-super
+
+**Build/assembly repo for the raidkm mdraid stack — clone THIS to
+get everything.** It contains no source of its own, only four submodules and a
+top-level `Makefile` that builds them in the right order.
+
+> Note: the `kernel/` submodule is the md kernel fork (the `mdraid` repo). It is
+> *not* this repo — `mdraid-super` is the umbrella that assembles `mdraid` +
+> `md-kmec` + `mdadm` + `lvm2` into one buildable tree.
+
+## Layout
+
+| Path        | Submodule repo                       | Role |
+|-------------|--------------------------------------|------|
+| `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
+| `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71) — builds `raidkm.ko` |
+| `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
+| `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
+
+## Quick start
+
+```sh
+git clone --recurse-submodules https://github.com/scopedog/mdraid-super.git
+cd mdraid-super
+make
+sudo make install      # installs .ko's + /sbin/mdadm, loads raidkm now, enables autoload on boot
+```
+
+`make install` loads `raidkm` immediately (best-effort, when installing for the
+running kernel — pulling in `isal_lib` via depmod) and drops
+`/etc/modules-load.d/raidkm.conf` so it autoloads on boot. It does **not**
+install the LVM-path `dm-raid.ko` — that shadows a distro module, so it's gated
+behind an explicit `sudo make install-dm-raid` (see *Via LVM* below).
+
+If you cloned without `--recurse-submodules`, run `./bootstrap.sh` (it inits the
+submodules and builds). `./bootstrap.sh install` builds and installs.
+
+The same `make` works on **both RHEL and Debian/Ubuntu** — it auto-detects the
+target from the running kernel (see *OS auto-detection* below).
+
+### Prerequisites
+
+**RHEL / CentOS Stream 10** (builds the full `kernel/` md fork):
+
+```sh
+sudo dnf install kernel-devel-$(uname -r) gcc make elfutils-libelf-devel openssl dwarves
+```
+
+**Debian 13 "trixie" / Ubuntu** (kernel 6.12; uses the distro's own md core):
+
+```sh
+sudo apt-get install build-essential linux-headers-$(uname -r) dwarves
+```
+
+(`mdadm` builds with `-DNO_LIBUDEV`, so no `libudev-dev` is needed. `dwarves`
+provides `pahole` for the build-time `struct mddev` ABI check; if absent, the
+check is skipped with a warning and the build continues.)
+
+## Build details
+
+- **OS auto-detection (RHEL & Debian/mainline).** `make` picks the target from
+  the kernel release (override with `make TARGET=rhel10|vanilla`):
+  - **RHEL** (`.el` in `uname -r`): builds the full `kernel/` md fork
+    (`isal_lib.ko`, `raid456.ko`, …) then `md-kmec` against it.
+  - **Debian / Ubuntu / mainline**: the distro's own `md_mod` provides md, so
+    only `kernel/isa-l` is built (for `isal_lib.ko` + the `ec_encode_data*`
+    symbols); `md-kmec` then compiles against its vendored vanilla `md.h`.
+  `mdadm/` is independent userspace and builds either way.
+- **Target kernel.** Module builds default to the running kernel
+  (`uname -r`). Override with `make KVER=<version> KDIR=<path>`. You need the
+  matching kernel headers (`kernel-devel` on RHEL, `linux-headers-$(uname -r)`
+  on Debian).
+- **ABI safety.** raidkm's `struct mddev` layout is verified against the target
+  kernel's BTF at build time (`md-kmec/tools/check-mddev-abi.sh` — vmlinux BTF
+  when md is builtin/RHEL, `md_mod` BTF when it's a module/Debian), so a
+  mismatched header set fails the build loudly rather than corrupting at runtime.
+  (For build-against-any-installed-kernel, a DKMS package would be the next
+  step — not provided here.)
+- **lvm2 is opt-in.** The `lvm2/` submodule is *not* part of the default `make`
+  (it runs lvm2's `./configure`, and is only needed for the LVM management path,
+  not for plain `mdadm` arrays). It needs extra dev packages beyond the core
+  build:
+  - Debian/Ubuntu: `sudo apt-get install libaio-dev libblkid-dev pkg-config`
+  - RHEL: `sudo dnf install libaio-devel libblkid-devel pkgconf-pkg-config`
+
+  Build it with `make lvm2`. **Never `make install` it over a system whose root is on LVM** —
+  run the from-tree `lvm2/tools/lvm` against a scratch VG with an isolated
+  `--config` instead.
+
+## Loading and using
+
+```sh
+sudo modprobe raidkm           # pulls in isal_lib via depmod
+sudo /sbin/mdadm --create /dev/md0 --level=raidkm --parity-count=2 \
+     --raid-devices=6 /dev/sd[b-g]
+```
+
+`--parity-count=N` sets the number of parity disks (m). Layout defaults to
+`rotating`; use `--layout=parity-last` for the non-rotating placement.
+
+### Via LVM (dm-raid path)
+
+The `lvm2/` fork manages raidkm as an LVM segtype. After `make lvm2` (see build
+notes above), the from-tree `lvm2/tools/lvm` can provision, repair and monitor
+level-71 LVs:
+
+```sh
+sudo lvm2/tools/lvm lvcreate --type raidkm --paritycount 2 -i 3 -L <size> <vg>
+```
+
+`--type raidkm` is the rotating layout, `--type raidkm_n` is parity-last;
+`--paritycount N` is m (2..8). `lvconvert --repair` rebuilds a failed leg onto a
+spare, and `lvchange --monitor y` + dmeventd auto-repairs. Note: raidkm reshape
+(growing data disks) is **not** supported through the dm/LVM path — use `mdadm`
+for that.
+
+**On Debian/mainline**, the dm-raid path needs a raidkm-aware `dm-raid.ko` — the
+distro's stock `dm-raid` has no `raidkm` raid_type. Install it persistently:
+
+```sh
+sudo make install-dm-raid               # builds + installs to updates/ (shadows the stock module)
+sudo rmmod dm_raid; sudo modprobe dm-raid   # switch the live module (or reboot)
+```
+
+This is **gated** (not part of `make install`) because it shadows a distro
+module; revert with `sudo make uninstall-dm-raid`. For a one-off without
+installing, `make lvm2` also builds it at `build/dm-raid-vanilla/dm-raid.ko` to
+`insmod` directly. (On RHEL this support is built into the `kernel/` fork, so no
+extra step.)
+
+## Tools & tests
+
+`tools/` (a symlink to `md-kmec/tools/`) collects the raidkm helper and test
+scripts. After a build + `sudo make install` (or with the modules loaded), run
+them as `sudo bash tools/<script>` — set `MDADM=$(pwd)/mdadm/mdadm` to use the
+from-tree mdadm:
+
+| Script | What it does |
+|--------|--------------|
+| `raidkm-test-functional.sh` | mdadm create / write / read-back / scrub smoke (12 cases) |
+| `raidkm-test-dm-rebuild.sh`, `raidkm-test-dm-reshape.sh` | the dm-raid / LVM path (rebuild, reshape) |
+| `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
+| `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
+| `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
+| `raidkm-standard-benchmark.sh` | throughput benchmark |
+| `raidkm-create.sh`, `raidkm-convert.sh` | create / convert helpers |
+| `check-mddev-abi.sh` | build-time `struct mddev` / `bitmap_ops` ABI guard |
+
+## Updating pinned versions
+
+Submodules are pinned to specific commits for reproducible builds. To advance
+them to their tracked branch tips:
+
+```sh
+git submodule update --remote
+git add kernel md-kmec mdadm lvm2
+git commit -m "bump submodules"
+```
+
+Tracked branches: `kernel`→`master`, `md-kmec`→`master`,
+`mdadm`→`raidkm-level71`, `lvm2`→`raidkm`.

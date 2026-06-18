@@ -1,0 +1,4 @@
+# top-level build artifacts (submodules carry their own .gitignore)
+*.o
+*.ko
+build/
