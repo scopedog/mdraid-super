@@ -1,13 +1,13 @@
-# mdraid-super — top-level build for the raidkm mdraid stack.
+# mdraid-super — top-level build for The Lustre Collective's mdraid stack.
 #
 # This repo is an *assembly* repo: it carries no source of its own, only
 # four submodules and this Makefile.  Clone it recursively and `make` to
 # build everything needed to create and manage a raidkm (level-71) array:
 #
-#   kernel/   -> scopedog/mdraid   (md fork: isal_lib.ko, raid456.ko, raid_isal.ko)
-#   md-kmec/  -> scopedog/md-kmec   (the raidkm personality: raidkm.ko)
-#   mdadm/    -> scopedog/mdadm      (raidkm-aware mdadm)
-#   lvm2/     -> scopedog/lvm2       (raidkm-aware LVM2; opt-in, see below)
+#   kernel/   -> TheLustreCollective/mdraid   (md fork: isal_lib.ko, raid456.ko, raid_isal.ko)
+#   md-kmec/  -> TheLustreCollective/md-kmec   (the raidkm personality: raidkm.ko)
+#   mdadm/    -> TheLustreCollective/mdadm      (raidkm-aware mdadm)
+#   lvm2/     -> TheLustreCollective/lvm2       (raidkm-aware LVM2; opt-in, see below)
 #
 # See README.md.  Build order matters: md-kmec links against the kernel
 # fork's md headers and isa-l symbols, so `kernel` builds first.

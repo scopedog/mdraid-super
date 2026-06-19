@@ -1,6 +1,6 @@
 # mdraid-super
 
-**Build/assembly repo for the raidkm mdraid stack — clone THIS to
+**Build/assembly repo for The Lustre Collective's mdraid stack — clone THIS to
 get everything.** It contains no source of its own, only four submodules and a
 top-level `Makefile` that builds them in the right order.
 
@@ -12,15 +12,15 @@ top-level `Makefile` that builds them in the right order.
 
 | Path        | Submodule repo                       | Role |
 |-------------|--------------------------------------|------|
-| `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
-| `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71) — builds `raidkm.ko` |
-| `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
-| `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
+| `kernel/`   | `TheLustreCollective/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
+| `md-kmec/`  | `TheLustreCollective/md-kmec`        | the **raidkm** erasure-coding personality (md level 71) — builds `raidkm.ko` |
+| `mdadm/`    | `TheLustreCollective/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
+| `lvm2/`     | `TheLustreCollective/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
 
 ## Quick start
 
 ```sh
-git clone --recurse-submodules https://github.com/scopedog/mdraid-super.git
+git clone --recurse-submodules git@github.com:TheLustreCollective/mdraid-super.git
 cd mdraid-super
 make
 sudo make install      # installs .ko's + /sbin/mdadm, loads raidkm now, enables autoload on boot
