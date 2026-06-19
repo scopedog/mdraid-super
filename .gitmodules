@@ -1,11 +1,11 @@
 [submodule "kernel"]
 	path = kernel
 	url = https://github.com/scopedog/mdraid.git
-	branch = main
+	branch = master
 [submodule "md-kmec"]
 	path = md-kmec
 	url = https://github.com/scopedog/md-kmec.git
-	branch = main
+	branch = master
 [submodule "mdadm"]
 	path = mdadm
 	url = https://github.com/scopedog/mdadm.git
