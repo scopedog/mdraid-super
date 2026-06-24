@@ -128,6 +128,57 @@ installing, `make lvm2` also builds it at `build/dm-raid-vanilla/dm-raid.ko` to
 `insmod` directly. (On RHEL this support is built into the `kernel/` fork, so no
 extra step.)
 
+## Performance
+
+raidkm (md level 71) is **faster than stock RAID6 on every workload**.  Measured
+at m=2 (two parity disks — the RAID6-equivalent) with
+`tools/raidkm-standard-benchmark.sh --runs=3`, a 6-workload OLTP/IOPS suite (page
+cache dropped before each test, both arrays created `--assume-clean`), on 6 brd
+ramdisks, k=4 m=2, 512 KiB chunk, **RHEL 10.2** (`6.12.0-211.22.1.el10_2`).
+Re-measured 2026-06-15 across the SIMD spectrum (IOPS, mean of 3 runs;
+integrity-checked, `mismatch_cnt=0` everywhere):
+
+| Test | base / no-GFNI<br>(Ryzen 5800X) | AVX2-GFNI<br>(i5-1340P) | AVX-512-GFNI<br>(Xeon 8481C, 8 vCPU) |
+|---|---|---|---|
+| 1 Random 4K Write         | 239,211 vs 124,327 (**1.92×**) | 107,728 vs 46,615 (**2.31×**) | 305,853 vs 72,767 (**4.20×**) |
+| 2 DB Mixed 8K (75/25)     | 420,982 vs 275,658 (**1.53×**) | 182,964 vs 96,838 (**1.89×**) | 504,563 vs 157,899 (**3.20×**) |
+| 3 High Concurrency 4K rw  | 555,725 vs 410,337 (**1.35×**) | 219,223 vs 135,716 (**1.62×**) | 818,197 vs 220,291 (**3.71×**) |
+| 4 OLTP 16K rw             | 222,370 vs 124,760 (**1.78×**) | 88,546 vs 42,677 (**2.07×**) | 266,346 vs 73,455 (**3.63×**) |
+| 5 Partial Stripe Write 8K | 179,735 vs 73,994 (**2.43×**) | 59,135 vs 24,053 (**2.46×**) | 159,960 vs 43,837 (**3.65×**) |
+
+(Each cell is *raidkm vs stock raid6* IOPS and the speedup.)  The win is
+**structural** — the forked `raid5.c` carries worker-group auto-default, a
+`STRIPE_ON_INACTIVE_LIST` lock-skip, and a faster write/RMW/partial-stripe path.
+
+> The ratio **scales with core count**; it is not a fixed per-machine constant.
+> raidkm's worker groups parallelize stripe handling (total threads auto-default
+> to `nproc/2`) while stock RAID6's RMW path is largely serial.  At m=2 parity is
+> the `raid6_call` P+Q fast path, so **GFNI does not change the m=2 numbers** — the
+> three columns differ as much by vCPU count as by SIMD tier; GFNI's encode
+> advantage shows at **m ≥ 3**.  brd is RAM-backed, so these isolate the CPU-side
+> win; real disks narrow the gap on device-bound workloads.
+
+### Rebuild / resync
+
+raidkm rebuilds a failed disk **substantially faster** because its resync path
+fans multiple stripes per `sync_request` instead of walking one stripe-window at
+a time.  Single-disk recovery, 6 × brd, k=4 m=2, 3 GiB/disk, GCP `c3-standard-8`
+(8 vCPU, Xeon 8481C), resync governor unthrottled:
+
+| `group_thread_cnt` | stock raid6 | raidkm m=2 |
+|---|---|---|
+| 0 (stock default) | ~200 MB/s | **1178 MB/s** (5.9×) |
+| 4 (matched)       | ~585 MB/s | **1178 MB/s** (2.0×) |
+
+raidkm's rebuild rate is **independent of `group_thread_cnt`** (the parallelism
+is in the sync path itself): ~2× apples-to-apples at matched `gtc=4`, ~6× out of
+the box (stock ships worker groups off).  *(brd is compute-bound; on real disks
+the rebuild is capped by write bandwidth, so the gap narrows.)*
+
+Full detail — per-core scaling, `worker_thread_cnt` tuning, and the reproduction
+recipe — is in
+[`md-kmec/README.md`](../md-kmec/README.md#benchmark--raidkm-vs-stock-raid6).
+
 ## Tools & tests
 
 `tools/` (a symlink to `md-kmec/tools/`) collects the raidkm helper and test
