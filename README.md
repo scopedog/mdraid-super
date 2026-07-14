@@ -150,6 +150,26 @@ integrity-checked, `mismatch_cnt=0` everywhere):
 **structural** — the forked `raid5.c` carries worker-group auto-default, a
 `STRIPE_ON_INACTIVE_LIST` lock-skip, and a faster write/RMW/partial-stripe path.
 
+### Native checksums: verified integrity at ~no cost
+
+raidkm's built-in per-4K CRC-32C (`mdadm --create … --integrity=crc32c`)
+verifies every read inline in the bio completion.  On real hardware (8 × local
+NVMe SSD, m=2, fio direct iodepth=32; percentages vs the same array with
+checksums off):
+
+| Workload | no checksum | **native checksum** | dm-integrity journal | dm-integrity bitmap |
+|---|---|---|---|---|
+| Seq write (MB/s)  | 2245 | **2264 (101%)** | 1088 (48%) | 2230 (99%) |
+| Rand write (K IOPS) | 97.2 | **93.2 (96%)** | 40.8 (42%) | 78.5 (81%) |
+| Seq read (MB/s)   | 5626 | **5599 (99.5%)** | 5624 (100%) | 5014 (89%) |
+| Rand read (K IOPS) | 1236.2 | **1235.9 (100.0%)** | 978.0 (79%) | 934.4 (76%) |
+
+Ahead of dm-integrity bitmap on all four workloads, ahead of journal on writes
+and random read, tying it on sequential read — with zero false mismatches.
+(Journal is crash-atomic, a stronger guarantee than native/bitmap, which
+recompute checksums after an unclean shutdown.)  Full setup + design:
+`md-kmec/README.md` and `md-kmec/notes/native-checksum-read-redesign-2026-07-14.md`.
+
 > The ratio **scales with core count**; it is not a fixed per-machine constant.
 > raidkm's worker groups parallelize stripe handling (total threads auto-default
 > to `nproc/2`) while stock RAID6's RMW path is largely serial.  At m=2 parity is
