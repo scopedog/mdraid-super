@@ -13,7 +13,7 @@ top-level `Makefile` that builds them in the right order.
 | Path        | Submodule repo                       | Role |
 |-------------|--------------------------------------|------|
 | `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
-| `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71 — k+m Reed-Solomon, m-failure durability, checksum-driven self-healing) — builds `raidkm.ko` |
+| `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71 — k+m Reed-Solomon, m-failure durability, native per-4K checksums with checksum-driven self-healing) — builds `raidkm.ko` |
 | `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
 | `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
 
@@ -191,7 +191,8 @@ from-tree mdadm:
 | `raidkm-test-functional.sh` | mdadm create / write / read-back / scrub smoke (12 cases) |
 | `raidkm-test-dm-rebuild.sh`, `raidkm-test-dm-reshape.sh` | the dm-raid / LVM path (rebuild, reshape) |
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
-| `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity (to m=8, on `dm-integrity`; needs `integritysetup`) |
+| `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
+| `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
 | `raidkm-standard-benchmark.sh` | throughput benchmark |
