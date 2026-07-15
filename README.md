@@ -170,6 +170,12 @@ and random read, tying it on sequential read — with zero false mismatches.
 recompute checksums after an unclean shutdown.)  Full setup + design:
 `md-kmec/README.md` and `md-kmec/notes/native-checksum-read-redesign-2026-07-14.md`.
 
+**Real-NVMe re-gated (2026-07-15)** on 4K-logical local-SSD NVMe under a KASAN +
+lockdep kernel — functional 12/12, csum-thrash, self-heal 60/60, randrw churn
+0 WARNs, 0 splats. The re-gate found and fixed a `skip_copy` × native-checksum
+read/write invariant `WARN_ON` (a read overlapping a draining zero-copy write is
+now deferred in `need_this_block`), plus two 4K-logical-device harness bugs.
+
 > The ratio **scales with core count**; it is not a fixed per-machine constant.
 > raidkm's worker groups parallelize stripe handling (total threads auto-default
 > to `nproc/2`) while stock RAID6's RMW path is largely serial.  At m=2 parity is
