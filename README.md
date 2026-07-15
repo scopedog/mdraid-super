@@ -152,7 +152,7 @@ integrity-checked, `mismatch_cnt=0` everywhere):
 
 ### Native checksums: verified integrity at ~no cost
 
-raidkm's built-in per-4K CRC-32C (`mdadm --create … --integrity=crc32c`)
+raidkm's built-in per-4K CRC-32C (`mdadm --create … --checksum=crc32c`, alias `--integrity`)
 verifies every read inline in the bio completion.  On real hardware (8 × local
 NVMe SSD, m=2, fio direct iodepth=32; percentages vs the same array with
 checksums off):
