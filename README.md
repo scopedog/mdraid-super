@@ -13,7 +13,7 @@ top-level `Makefile` that builds them in the right order.
 | Path        | Submodule repo                       | Role |
 |-------------|--------------------------------------|------|
 | `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
-| `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71 — k+m Reed-Solomon, m-failure durability, native per-4K checksums with checksum-driven self-healing) — builds `raidkm.ko` |
+| `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71 — k+m Reed-Solomon, m-failure durability, native per-4K checksums with checksum-driven self-healing, **declustered parity** with distributed-spare fast rebuild) — builds `raidkm.ko` |
 | `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
 | `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
 
@@ -96,7 +96,12 @@ sudo /sbin/mdadm --create /dev/md0 --level=raidkm --parity-count=2 \
 ```
 
 `--parity-count=N` sets the number of parity disks (m). Layout defaults to
-`rotating`; use `--layout=parity-last` for the non-rotating placement.
+`rotating`; use `--layout=parity-last` for the non-rotating placement, or
+`--layout=declustered --group-width=<k+m> [--spare-columns=<s>]` for a wide pool
+whose stripe is narrower than the disk count, with a **distributed spare** that
+rebuilds a failed member in parallel across the whole pool (see *Declustered
+parity* below and
+[`md-kmec/README.md`](../md-kmec/README.md#declustered-parity)).
 
 ### Via LVM (dm-raid path)
 
@@ -205,6 +210,19 @@ Full detail — per-core scaling, `worker_thread_cnt` tuning, and the reproducti
 recipe — is in
 [`md-kmec/README.md`](../md-kmec/README.md#benchmark--raidkm-vs-stock-raid6).
 
+### Declustered rebuild (wide pools)
+
+For **wide** pools, the bigger rebuild win comes from `--layout=declustered`: a
+narrow `k+m` stripe is scattered over the whole disk pool with a **distributed
+spare**, so a failed member is reconstructed across *every* survivor at once
+instead of funnelling through one replacement. On real NVMe, rebuilding a failed
+16 GB member on an **80-disk pool (g=13, i.e. 11+2)** took **44.9 s** vs
+**785.1 s** for a classic 78+2 array — **17.5×** — and the array is never fully
+degraded during it. Adding the replacement later migrates the data back by a
+parallel **copy-from-spare** (no decode, no degraded window). Full mechanism,
+create syntax, and `rk_dcl_populate` / auto-rebuild usage:
+[`md-kmec/README.md`](../md-kmec/README.md#declustered-parity).
+
 ## Tools & tests
 
 `tools/` (a symlink to `md-kmec/tools/`) collects the raidkm helper and test
@@ -219,6 +237,7 @@ from-tree mdadm:
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
 | `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
 | `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
+| `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, dm-flakey crash matrices |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
 | `raidkm-standard-benchmark.sh` | throughput benchmark |
