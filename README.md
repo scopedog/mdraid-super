@@ -218,12 +218,19 @@ spare**, so a failed member is reconstructed across *every* survivor at once
 instead of funnelling through one replacement. On real NVMe, rebuilding a failed
 16 GB member on an **80-disk pool (g=13, i.e. 11+2)** took **44.9 s** vs
 **785.1 s** for a classic 78+2 array — **17.5×** — and the array is never fully
-degraded during it. Adding the replacement later migrates the data back by a
-parallel **copy-from-spare** (no decode, no degraded window). **Native checksums
-compose** with declustering — the CRC region stacks after the on-disk geometry
-block, CRCs are keyed by physical disk (so spare-redirected reads still verify),
-and the copy-from-spare rebalance migrates each block's CRC with the bytes. Full
-mechanism, create syntax, and `rk_dcl_populate` / auto-rebuild usage:
+degraded during it. That follows from *where the rebuild I/O lands*: a classic
+rebuild funnels every reconstructed byte onto the one spare, while declustered
+spreads it across the pool. Per-disk I/O counters
+(`md-kmec/tools/raidkm-bench-declustered-rebuild-load.sh`, device-count-
+independent) show the busiest disk's rebuild write drop by **14×/42×/85×** at
+N=14/42/80 (≈ pool width), and copy-from-spare reads **5×/9×/13×** fewer survivor
+bytes than a decode rebuild (≈ group width − 1). Adding the replacement later
+migrates the data back by that parallel **copy-from-spare** (no decode, no
+degraded window). **Native checksums compose** with declustering — the CRC
+region stacks after the on-disk geometry block, CRCs are keyed by physical disk
+(so spare-redirected reads still verify), and the copy-from-spare rebalance
+migrates each block's CRC with the bytes. Full mechanism, the scaling table,
+create syntax, and `rk_dcl_populate` / auto-rebuild usage:
 [`md-kmec/README.md`](../md-kmec/README.md#declustered-parity).
 
 ## Tools & tests
