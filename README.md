@@ -219,8 +219,11 @@ instead of funnelling through one replacement. On real NVMe, rebuilding a failed
 16 GB member on an **80-disk pool (g=13, i.e. 11+2)** took **44.9 s** vs
 **785.1 s** for a classic 78+2 array — **17.5×** — and the array is never fully
 degraded during it. Adding the replacement later migrates the data back by a
-parallel **copy-from-spare** (no decode, no degraded window). Full mechanism,
-create syntax, and `rk_dcl_populate` / auto-rebuild usage:
+parallel **copy-from-spare** (no decode, no degraded window). **Native checksums
+compose** with declustering — the CRC region stacks after the on-disk geometry
+block, CRCs are keyed by physical disk (so spare-redirected reads still verify),
+and the copy-from-spare rebalance migrates each block's CRC with the bytes. Full
+mechanism, create syntax, and `rk_dcl_populate` / auto-rebuild usage:
 [`md-kmec/README.md`](../md-kmec/README.md#declustered-parity).
 
 ## Tools & tests
@@ -237,7 +240,7 @@ from-tree mdadm:
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
 | `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
 | `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
-| `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, dm-flakey crash matrices |
+| `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
 | `raidkm-standard-benchmark.sh` | throughput benchmark |
