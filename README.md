@@ -224,7 +224,11 @@ spreads it across the pool. Per-disk I/O counters
 (`md-kmec/tools/raidkm-bench-declustered-rebuild-load.sh`, device-count-
 independent) show the busiest disk's rebuild write drop by **14×/42×/85×** at
 N=14/42/80 (≈ pool width), and copy-from-spare reads **5×/9×/13×** fewer survivor
-bytes than a decode rebuild (≈ group width − 1). Adding the replacement later
+bytes than a decode rebuild (≈ group width − 1). A three-way wall-clock run
+(`raidkm-standard-benchmark.sh --rebuild-victim`) reproduces the win end-to-end —
+**2.05× at N=14, 15.8× at N=80** — and confirms the declustered code adds **no
+overhead to the classic path** (a classic array rebuilds and benchmarks the same
+on the current build as on the pre-declustered build). Adding the replacement later
 migrates the data back by that parallel **copy-from-spare** (no decode, no
 degraded window). **Native checksums compose** with declustering — the CRC
 region stacks after the on-disk geometry block, CRCs are keyed by physical disk
