@@ -26,21 +26,35 @@ LVM2   := $(TOP)/lvm2
 KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
 
-# Build target.  RHEL kernels carry ".el" in the release and ship a forked,
-# builtin md core, so we build the whole kernel/ fork.  Everything else
-# (Debian / Ubuntu / mainline) uses the distro's OWN md_mod — there we build
-# ONLY isa-l from the fork (for isal_lib.ko + the EC symbols raidkm links
-# against); raidkm then builds against its vendored vanilla md headers
-# (md-kmec auto-detects the same way).  Override with TARGET=rhel10|vanilla.
-TARGET ?= $(if $(findstring .el,$(KVER)),rhel10,vanilla)
-ifeq ($(TARGET),vanilla)
-KMOD           := isa-l
-INSTALL_KERNEL := install-isa-l
-LVM2_KMOD      := dm-raid-ko
-else
+# Build target.  RHEL 10 kernels carry ".el10" and ship a forked, builtin md
+# core, so there we build the whole kernel/ fork.  RHEL 9 (".el9") and
+# everything else (Debian / Ubuntu / mainline) use the distro's OWN md_mod —
+# there we build ONLY isa-l from the fork (for isal_lib.ko + the EC symbols
+# raidkm links against), and raidkm compiles against its vendored md headers
+# for that flavour (md-rhel9/ or md-vanilla/) plus the matching compat shim.
+#
+# This detection mirrors md-kmec's own, and TARGET is passed down to it, so
+# the two cannot disagree.  Override with TARGET=rhel10|rhel9|vanilla — useful
+# when KDIR points at a kernel whose release string lacks the distro suffix
+# (e.g. a locally built debug kernel).
+TARGET ?= $(if $(findstring .el9,$(KVER)),rhel9,$(if $(findstring .el,$(KVER)),rhel10,vanilla))
+ifeq ($(TARGET),rhel10)
 KMOD           := kernel
 INSTALL_KERNEL := install-kernel
 LVM2_KMOD      :=
+else ifeq ($(TARGET),rhel9)
+# Distro md core, as on vanilla — only the md-kmec side differs (md-rhel9/ +
+# compat-rhel9.h, selected by the TARGET we pass down).  The dm-raid/LVM path
+# is NOT wired up here: dm-raid-ko builds against md-vanilla/ + compat-vanilla.h,
+# which is wrong for a 5.14 kernel.  Hence LVM2_KMOD is empty and dm-raid-ko
+# refuses to run (see below).
+KMOD           := isa-l
+INSTALL_KERNEL := install-isa-l
+LVM2_KMOD      :=
+else
+KMOD           := isa-l
+INSTALL_KERNEL := install-isa-l
+LVM2_KMOD      := dm-raid-ko
 endif
 
 .PHONY: all kernel isa-l dm-raid-ko md-kmec mdadm lvm2 modules tools install \
@@ -71,7 +85,7 @@ isa-l:
 # `kernel` on RHEL, `isa-l` on Debian/mainline). MDRAID_BUILD must be absolute
 # (its default ../mdraid doesn't exist in this layout — the fork is kernel/).
 md-kmec: $(KMOD)
-	cd $(MDKMEC) && $(MAKE) KVER=$(KVER) MDRAID_BUILD=$(KERNEL)
+	cd $(MDKMEC) && $(MAKE) KVER=$(KVER) TARGET=$(TARGET) MDRAID_BUILD=$(KERNEL)
 
 # raidkm-aware mdadm — userspace, independent of the kernel build.
 # -DNO_LIBUDEV keeps the build self-contained (no libudev dependency).
@@ -100,6 +114,7 @@ lvm2: $(LVM2_KMOD)
 # Load it in place of the stock module (see README) — it is NOT auto-installed.
 DMRAID_KO_DIR := $(TOP)/build/dm-raid-vanilla
 dm-raid-ko:
+	@test "$(TARGET)" = vanilla || { echo "dm-raid-ko: vanilla/mainline only — it builds against md-vanilla/ + compat-vanilla.h. RHEL 10 already has raidkm dm-raid in the kernel/ fork; RHEL 9 is not wired up (would need md-rhel9/ + compat-rhel9.h)."; exit 1; }
 	@mkdir -p $(DMRAID_KO_DIR)
 	cp -f $(KERNEL)/md/dm-raid.c $(DMRAID_KO_DIR)/dm-raid.c
 	printf 'obj-m += dm-raid.o\nccflags-y += -I$(MDKMEC)/md-vanilla\n' > $(DMRAID_KO_DIR)/Kbuild
@@ -120,7 +135,7 @@ tools:   mdadm
 # dm-raid.ko — that shadows a distro module, so it is gated behind the explicit
 # `install-dm-raid` target below.
 install: $(INSTALL_KERNEL)
-	cd $(MDKMEC) && $(MAKE) KVER=$(KVER) MDRAID_BUILD=$(KERNEL) install
+	cd $(MDKMEC) && $(MAKE) KVER=$(KVER) TARGET=$(TARGET) MDRAID_BUILD=$(KERNEL) install
 	cd $(MDADM)  && $(MAKE) install-bin
 	install -d /etc/modules-load.d
 	printf 'raidkm\n' > /etc/modules-load.d/raidkm.conf
@@ -149,7 +164,7 @@ install-isa-l:
 # dm-raid) or reboot is needed to switch the live module.
 DMRAID_UPDATES := /lib/modules/$(KVER)/updates
 install-dm-raid: dm-raid-ko
-	@test "$(TARGET)" = vanilla || { echo "install-dm-raid: vanilla/Debian only (RHEL ships raidkm dm-raid in the kernel/ fork)"; exit 1; }
+	@test "$(TARGET)" = vanilla || { echo "install-dm-raid: vanilla/mainline only (RHEL 10 ships raidkm dm-raid in the kernel/ fork; RHEL 9 is not wired up)"; exit 1; }
 	install -d $(DMRAID_UPDATES)
 	install -m644 $(DMRAID_KO_DIR)/dm-raid.ko $(DMRAID_UPDATES)/dm-raid.ko
 	depmod -a $(KVER)
