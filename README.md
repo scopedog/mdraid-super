@@ -35,12 +35,20 @@ behind an explicit `sudo make install-dm-raid` (see *Via LVM* below).
 If you cloned without `--recurse-submodules`, run `./bootstrap.sh` (it inits the
 submodules and builds). `./bootstrap.sh install` builds and installs.
 
-The same `make` works on **both RHEL and Debian/Ubuntu** — it auto-detects the
-target from the running kernel (see *OS auto-detection* below).
+The same `make` works on **RHEL 10 and Debian/Ubuntu** — it auto-detects the
+target from the running kernel (see *OS auto-detection* below).  **RHEL 9** needs
+a two-step build for now; raidkm itself is fully supported there.
 
 ### Prerequisites
 
 **RHEL / CentOS Stream 10** (builds the full `kernel/` md fork):
+
+```sh
+sudo dnf install kernel-devel-$(uname -r) gcc make elfutils-libelf-devel openssl dwarves
+```
+
+**RHEL 9** (kernel 5.14; uses the distro's own md core — see *RHEL 9* under
+*Build details* for the two-step build):
 
 ```sh
 sudo dnf install kernel-devel-$(uname -r) gcc make elfutils-libelf-devel openssl dwarves
@@ -60,12 +68,26 @@ check is skipped with a warning and the build continues.)
 
 - **OS auto-detection (RHEL & Debian/mainline).** `make` picks the target from
   the kernel release (override with `make TARGET=rhel10|vanilla`):
-  - **RHEL** (`.el` in `uname -r`): builds the full `kernel/` md fork
+  - **RHEL 10** (`.el` in `uname -r`): builds the full `kernel/` md fork
     (`isal_lib.ko`, `raid456.ko`, …) then `md-kmec` against it.
   - **Debian / Ubuntu / mainline**: the distro's own `md_mod` provides md, so
     only `kernel/isa-l` is built (for `isal_lib.ko` + the `ec_encode_data*`
     symbols); `md-kmec` then compiles against its vendored vanilla `md.h`.
   `mdadm/` is independent userspace and builds either way.
+- **RHEL 9 — supported by `md-kmec`, not yet by this umbrella.** raidkm builds
+  and runs on RHEL 9 (`make TARGET=rhel9` in `md-kmec/`, against its vendored
+  `md-rhel9/` headers), and is validated there under KASAN + lockdep.  The
+  umbrella's auto-detection, however, only distinguishes `.el` from mainline and
+  selects `rhel10`, which would try to build the whole 6.12-era `kernel/` md fork
+  against a 5.14 kernel.  Until the umbrella learns `rhel9`, build the two pieces
+  explicitly — only `isa-l` is needed from the kernel fork:
+
+  ```sh
+  make -C /usr/src/kernels/$(uname -r) M=$PWD/kernel/isa-l modules
+  cd md-kmec && make TARGET=rhel9 MDRAID_BUILD=../kernel
+  ```
+
+  The distro's own `md_mod` provides md, exactly as on the mainline path.
 - **Target kernel.** Module builds default to the running kernel
   (`uname -r`). Override with `make KVER=<version> KDIR=<path>`. You need the
   matching kernel headers (`kernel-devel` on RHEL, `linux-headers-$(uname -r)`
