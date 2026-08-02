@@ -17,6 +17,151 @@ top-level `Makefile` that builds them in the right order.
 | `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
 | `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
 
+## What md-kmec (raidkm) gives you
+
+`raidkm` is the md personality this stack exists to ship: **md level 71**, a fork
+of our optimized `raid5.c` plus our ISA-L fork's erasure-coding primitives.  All
+of the below is implemented and gated by the test suite in `tools/`; measured
+numbers are in *Performance* further down, and the full design/validation detail
+for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
+
+### Erasure coding: arbitrary *k* + *m*
+
+- **Any parity count m, not just 2.** `--parity-count=N` gives an array that
+  survives **N simultaneous disk losses** (m = 2…16; mdadm's help documents the
+  common 2–8 range).  m=2 is the RAID6-equivalent case; m≥3 is something stock
+  md cannot do at all.  Array width is bounded by the GF(2⁸) field, `k+m ≤ 255`,
+  and is validated in practice out to **80-disk** arrays.
+- **One code for every m.** Parity is ISA-L's `gf_gen_rs_matrix` Reed-Solomon
+  code (Vandermonde to m=3, Cauchy above), so the m=2 image is a valid *prefix*
+  of the m≥3 encoding — that is what makes "add a parity disk" an incremental
+  operation rather than a rewrite.
+- **m=2 is byte-identical to RAID6.** At m=2 the code's first two rows are
+  exactly RAID6's P and Q, so raidkm encodes m=2 with raid6's tuned SIMD
+  (`raid6_call`) for full speed while writing bytes a stock RAID6 would write.
+  That also makes **offline raid6 ↔ raidkm conversion** possible in place
+  (`tools/raidkm-convert.sh`, `mdadm --raidkm-convert` — rotating layout, m=2:
+  it rewrites the superblock, not the data).
+- **GFNI-accelerated, PSHUFB-free decode.** Every degraded read, rebuild and
+  degraded write goes through one unified decode (build the survivor matrix,
+  `gf_invert_matrix`, apply with `ec_encode_data_*`), using AVX-512/AVX2 **GFNI**
+  when the CPU has it and a table-lookup fallback otherwise.  Decode deliberately
+  avoids raid6's `*_recov` and ISA-L's PSHUFB kernels, keeping clear of the
+  StreamScale patent surface.
+
+### Parity placement: three layouts
+
+- **`--layout=rotating` (default)** — generalized left-symmetric: the m-block
+  parity slot rotates one disk per stripe, so parity and read traffic spread
+  across every member (stock RAID6's own default shape).
+- **`--layout=parity-last`** — dedicated parity on the tail m disks; data lives
+  on a fixed prefix and never moves, which keeps the cheap offline add-a-parity
+  grow available.
+- **`--layout=declustered`** — a narrow `k+m` group scattered over a much wider
+  pool by a seeded balanced permutation, with **distributed spare** columns
+  instead of a dedicated hot spare.  Capacity balance is exact by construction,
+  rebuild load is rotation-symmetric, and the geometry (`--group-width`,
+  `--spare-columns`, seed) persists in a per-member `rkdcl` metadata block.
+  Clean-room combinatorics — dRAID *lineage*, no OpenZFS/CDDL code.
+
+### Fast rebuild
+
+- **Parallel resync path.** raidkm's resync fans multiple stripes per
+  `sync_request` instead of walking one stripe-window at a time, so single-disk
+  recovery runs ~2× stock at matched worker counts and ~6× out of the box.
+- **Declustered rebuild (the wide-pool win).** With a distributed spare, a failed
+  member is reconstructed across *every* survivor at once instead of funnelling
+  into one replacement disk — **17.5× faster** on an 80-disk pool, and the array
+  is never fully degraded while it happens.  Population is a raidkm-owned sync
+  action (`rk_dcl_populate`, or automatic via `rk_dcl_auto=1`) with a crash-safe
+  journaled progress mark, and supports **sequential multi-assignment** (up to
+  `s` failed disks, resolved through chained redirects).
+- **Rebalance by copy, not decode.** Adding a replacement disk migrates the data
+  back with a 16-worker parallel **copy-from-spare** — no GF decode, no degraded
+  window — falling back to the decode leg on any persistent copy fault.
+
+### Integrity: native checksums and self-healing
+
+- **Native per-4K CRC-32C** (`mdadm --create … --checksum=crc32c`) — raidkm
+  computes, stores and verifies a checksum for every 4 KiB block itself, with no
+  dm-integrity stacking.  CRCs live in a reserved region at each member's tail
+  (~0.1% of capacity) in self-checking pages, served through a bounded
+  demand-paged cache; reads verify **inline in the bio completion**, including a
+  verified chunk-aligned read bypass.  Cost is **96–101% of the no-checksum
+  baseline** on real NVMe — ahead of dm-integrity in every mode but journal-mode
+  sequential read (table below).
+- **Checksum-driven self-healing.** An integrity-flagged read becomes an
+  *erasure*: the block is reconstructed from parity and rewritten, on both the
+  read path and the m-way scrub, with mixed data+parity corruption healed in one
+  pass.  Validated healing **8 silent corruptions in a single stripe** (m=8) —
+  beyond RAID-Z3's three.  A `healed_blocks` sysfs counter reports repairs.  The
+  detection signal can be native checksums, a stacked `dm-integrity`, or (next)
+  T10-PI passthrough.
+- **Composes with declustering** — CRCs are keyed by *physical* pool disk, so a
+  spare-redirected read still verifies, and the copy-from-spare rebalance migrates
+  each block's CRC along with its bytes.
+
+### Online reshape — grow *and* shrink, crash-safe, no backup file
+
+All of these run with the array **readable and writable**, and a power loss is
+recovered by a plain `mdadm --assemble` replaying the in-kernel journal
+([details](../md-kmec/README.md#grow)):
+
+| Command | Effect |
+|---|---|
+| `--grow --add-data <disks>` | add data disk(s) — more capacity, m fixed (both classic layouts) |
+| `--grow --raid-devices=<N-1>` | remove a data disk — shrink capacity, m fixed (clamp `--array-size` first; mdadm prints the value) |
+| `--grow --add-parity <disks>` | raise m, k fixed — online COW reshape on rotating; cheap offline recreate on parity-last |
+| `--grow --remove-parity` | lower m (≥2 remain), k and capacity fixed — online COW re-encode |
+| `--grow --raid-devices=N'` (declustered) | grow **or** shrink the pool by whole groups, distributed spare intact |
+| `--grow --add-parity` / `--add-data` / `--spare-columns=s'` (declustered) | change the per-group geometry online, serving the un-migrated region with old-geometry stripes |
+
+The engine is a journaled **copy-on-write** reshape: each band is staged
+out-of-place and STAGE→COMMIT→DONE journaled before its home is overwritten, so
+no live block is ever overwritten before its replacement is durable.  Shrinks
+walk the same engine **backwards**.  Native-checksum arrays reshape too (CRCs are
+re-keyed with the data).  Freed members drop out as spares.
+
+### Degraded operation and repair
+
+Degraded reads, degraded **writes**, and degraded scrub all work up to m
+failures; hot-replace rebuilds a failed member onto a spare (data by decode,
+parity by re-encode), including rebuild-while-still-degraded.  A **write-intent
+bitmap** works out of the box (a `--re-add` after an unclean shutdown resyncs
+only the dirty region — seconds instead of minutes).  **PPL** (partial parity
+log) is available opt-in to close the write hole, extended from raid5's single
+XOR to logging all m partial parities; it costs 43–72% on RAM-backed devices, so
+it is off by default and mutually exclusive with the bitmap.
+
+### Performance defaults you get for free
+
+Worker groups are **auto-enabled** (total threads default to `nproc/2`, spread
+one group per NUMA node) and zero-copy full-stripe writes (`skip_copy`) default
+**on** — stock md ships both off.  Together with a faster write/RMW/partial-stripe
+path, that is why raidkm beats stock RAID6 on every benchmarked workload (see
+*Performance*).  Tunables: `worker_thread_cnt` / `group_thread_cnt`,
+`stripe_cache_size`, and the `raidkm_csum_cache_pages` module parameter; the
+deployment checklist (pick `k` so `k × chunk` is a power of two, keep the
+filesystem journal off the array, align the partition to a row) is in
+[`md-kmec/README.md`](../md-kmec/README.md#tuning).
+
+### Management paths
+
+`mdadm` (create / assemble / grow / shrink / convert), raw **device-mapper**
+(`dmsetup create … raid raidkm …`, no new dm target), and **LVM**
+(`lvcreate --type raidkm` / `raidkm_n`, `lvconvert --repair`, dmeventd monitoring
+and auto-repair).  Reshape is mdadm-only — the dm/LVM path is gated off for it.
+
+### Portability and assurance
+
+One source tree builds against **RHEL 10** (forked builtin md core), **RHEL 9**
+(distro `md_mod`, vendored 5.14 headers) and **mainline/Debian**, selected
+automatically, with a build-time `struct mddev` BTF/ABI guard so a mismatched
+header set fails loudly instead of corrupting at runtime.  The stack is gated on
+real NVMe under **KASAN + lockdep** (zero splats) as well as on ramdisks, with
+dedicated power-loss and torn-write crash matrices (dm-flakey plus a fault-inject
+build) for every reshape, population and rebalance path.
+
 ## Quick start
 
 ```sh
