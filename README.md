@@ -10,12 +10,14 @@ top-level `Makefile` that builds them in the right order.
 
 ## Layout
 
-| Path        | Submodule repo                       | Role |
+| Path        | Submodule repo / target              | Role |
 |-------------|--------------------------------------|------|
 | `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
 | `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71 — k+m Reed-Solomon, m-failure durability, native per-4K checksums with checksum-driven self-healing, **declustered parity** with distributed-spare fast rebuild) — builds `raidkm.ko` |
 | `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
 | `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
+| `docs/`     | symlink → `md-kmec/docs/`            | the raidkm **field manual** — feature catalogue, layout maps, and a task-ordered command reference ([`docs/raidkm-field-manual.md`](docs/raidkm-field-manual.md)) |
+| `tools/`    | symlink → `md-kmec/tools/`           | raidkm helper and test scripts (see *Tools & tests* below) |
 
 ## What md-kmec (raidkm) gives you
 
