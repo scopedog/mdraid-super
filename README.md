@@ -12,7 +12,7 @@ top-level `Makefile` that builds them in the right order.
 
 | Path        | Submodule repo / target              | Role |
 |-------------|--------------------------------------|------|
-| `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against) |
+| `kernel/`   | `scopedog/mdraid`         | md kernel fork — builds `isal_lib.ko`, `raid456.ko`, `raid_isal.ko` (and the `Module.symvers` md-kmec links against). `isal_lib.ko`'s exports carry an `isal_lib_` prefix so it cannot collide with another module vendoring the same ISA-L API |
 | `md-kmec/`  | `scopedog/md-kmec`        | the **raidkm** erasure-coding personality (md level 71 — k+m Reed-Solomon, m-failure durability, native per-4K checksums with checksum-driven self-healing, **declustered parity** with distributed-spare fast rebuild) — builds `raidkm.ko` |
 | `mdadm/`    | `scopedog/mdadm` (`raidkm-level71`) | raidkm-aware `mdadm` for creating/managing arrays |
 | `lvm2/`     | `scopedog/lvm2` (`raidkm`)          | raidkm-aware LVM2 — `lvcreate --type raidkm`, repair, dmeventd monitoring (the dm-raid/LVM management path) |
@@ -266,6 +266,27 @@ whose stripe is narrower than the disk count, with a **distributed spare** that
 rebuilds a failed member in parallel across the whole pool (see *Declustered
 parity* below and
 [`md-kmec/README.md`](../md-kmec/README.md#declustered-parity)).
+
+### If `modprobe raidkm` fails with a duplicate symbol
+
+Other out-of-tree modules vendor the same ISA-L erasure-coding port that
+`isal_lib.ko` carries, and export it under the upstream ISA-L names.  Because
+the kernel matches exported symbols by bare name, whichever module loads second
+is rejected outright:
+
+```
+[  138.102767] isal_lib: exports duplicate symbol ec_encode_data_avx2_gfni (owned by ec)
+insmod: ERROR: could not insert module isal_lib.ko: Invalid module format
+```
+
+`isal_lib.ko`'s 33 exports now all carry an `isal_lib_` prefix, so it coexists
+with such a module and the two load in any order.  If you still see the error
+above, the `kernel/` (mdraid) submodule predates the prefix — update the
+submodule rather than blacklisting the other module.  Verify with:
+
+```sh
+lsmod | grep isal_lib
+```
 
 ### Via LVM (dm-raid path)
 

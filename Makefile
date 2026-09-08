@@ -62,7 +62,9 @@ endif
 
 all: md-kmec mdadm
 
-# Kernel md fork — produces isal_lib.ko, raid456.ko, raid_isal.ko and the
+# Kernel md fork — produces isal_lib.ko (whose exports are prefixed isal_lib_
+# so they cannot collide with another module vendoring the same ISA-L API),
+# raid456.ko, raid_isal.ko and the
 # Module.symvers that md-kmec links its EC calls against.
 #
 # NB: we `cd` into each submodule rather than `$(MAKE) -C`. The kernel/ and
