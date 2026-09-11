@@ -2,3 +2,5 @@
 *.o
 *.ko
 build/
+specs/selkie/
+target/

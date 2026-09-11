@@ -440,6 +440,7 @@ from-tree mdadm:
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
 | `raidkm-standard-benchmark.sh` | throughput benchmark |
+| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`; ABBA order, ratio tables; `--dry-run` prints every command first |
 | `raidkm-create.sh`, `raidkm-convert.sh` | create / convert helpers |
 | `check-mddev-abi.sh` | build-time `struct mddev` / `bitmap_ops` ABI guard |
 
