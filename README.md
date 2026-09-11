@@ -69,8 +69,10 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
 ### Fast rebuild
 
 - **Parallel resync path.** raidkm's resync fans multiple stripes per
-  `sync_request` instead of walking one stripe-window at a time, so single-disk
-  recovery runs ~2× stock at matched worker counts and ~6× out of the box.
+  `sync_request` instead of walking one stripe-window at a time, so on a
+  CPU-bound array single-disk recovery runs ~2× stock at matched worker counts
+  and ~6× out of the box; on a disk-bound array (NVMe-oF) it is at parity with
+  stock (see *Rebuild / resync*).
 - **Declustered rebuild (the wide-pool win).** With a distributed spare, a failed
   member is reconstructed across *every* survivor at once instead of funnelling
   into one replacement disk — **17.5× faster** on an 80-disk pool, and the array
@@ -391,6 +393,12 @@ is in the sync path itself): ~2× apples-to-apples at matched `gtc=4`, ~6× out 
 the box (stock ships worker groups off).  *(brd is compute-bound; on real disks
 the rebuild is capped by write bandwidth, so the gap narrows.)*
 
+On a disk-bound array the gap closes: an independent evaluation over NVMe-oF
+with QLC namespaces (k=8 m=2, 128 KiB chunk) measured raidkm and stock raid6 at
+parity at every matched worker count (535 vs 545 MiB/s at `group_thread_cnt`
+32).  Both engines rebuild in ~4 KiB stripe units there; treat the 2× / 6×
+figures as the CPU-bound ceiling.
+
 Full detail — per-core scaling, `worker_thread_cnt` tuning, and the reproduction
 recipe — is in
 [`md-kmec/README.md`](../md-kmec/README.md#benchmark--raidkm-vs-stock-raid6).
@@ -439,7 +447,9 @@ from-tree mdadm:
 | `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
-| `raidkm-standard-benchmark.sh` | throughput benchmark |
+| `raidkm-standard-benchmark.sh` | throughput benchmark (7 workloads incl. 1 MiB sequential), with the request size reaching the member devices per workload |
+| `raidkm-bench-iosize.sh` | request size and merge share at the members per I/O state (healthy, degraded, rebuild, declustered populate / copy-back) on a `null_blk` rig — the check for flash with a large indirection unit |
+| `raidkm-member-stats.sh` | sourced helper: resolves an array to the devices carrying its member requests (NVMe multipath paths included) |
 | `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`; ABBA order, ratio tables; `--dry-run` prints every command first |
 | `raidkm-create.sh`, `raidkm-convert.sh` | create / convert helpers |
 | `check-mddev-abi.sh` | build-time `struct mddev` / `bitmap_ops` ABI guard |
