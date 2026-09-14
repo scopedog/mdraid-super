@@ -142,8 +142,10 @@ it is off by default and mutually exclusive with the bitmap.
 Worker groups are **auto-enabled** (total threads default to `nproc/2`, spread
 one group per NUMA node) and zero-copy full-stripe writes (`skip_copy`) default
 **on** — stock md ships both off.  Together with a faster write/RMW/partial-stripe
-path, that is why raidkm beats stock RAID6 on every benchmarked workload (see
-*Performance*).  Tunables: `worker_thread_cnt` / `group_thread_cnt`,
+path, that is why raidkm beats stock RAID6 on every workload of the CPU-bound
+benchmarks (see *Performance*).  Where the drives are the limit — 8+2 on local
+NVMe — healthy workloads match stock and degraded reads lead (1.11× rotating,
+1.16× declustered) on a quarter of the cores.  Tunables: `worker_thread_cnt` / `group_thread_cnt`,
 `stripe_cache_size`, and the `raidkm_csum_cache_pages` module parameter; the
 deployment checklist (pick `k` so `k × chunk` is a power of two, keep the
 filesystem journal off the array, align the partition to a row) is in
@@ -444,13 +446,14 @@ from-tree mdadm:
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
 | `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
 | `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
+| `raidkm-test-row-dread-wide.sh`, `raidkm-test-row-csum.sh` | row layer — a degraded span read once per row (unaligned spans, two failures, races, declustered), and native checksum verified and published through the row paths (poisoned survivors must be refused) |
 | `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
 | `raidkm-standard-benchmark.sh` | throughput benchmark (7 workloads incl. 1 MiB sequential), with the request size reaching the member devices per workload |
-| `raidkm-bench-iosize.sh` | request size and merge share at the members per I/O state (healthy, degraded, rebuild, declustered populate / copy-back) on a `null_blk` rig — the check for flash with a large indirection unit |
+| `raidkm-bench-iosize.sh` | request size and merge share at the members per I/O state (healthy, degraded, rebuild, declustered populate / copy-back) on a `null_blk` rig or real devices (`--devs`), optionally with native checksum (`--checksum`) — the check for flash with a large indirection unit |
 | `raidkm-member-stats.sh` | sourced helper: resolves an array to the devices carrying its member requests (NVMe multipath paths included) |
-| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`; ABBA order, ratio tables; `--dry-run` prints every command first |
+| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`, declustered `dcl<M>`; ABBA order with a discarded warm-up pass (the first run on fresh flash reads high) and optional steady-state preconditioning, ratio tables plus every run in execution order; `--dry-run` prints every command first |
 | `raidkm-create.sh`, `raidkm-convert.sh` | create / convert helpers |
 | `check-mddev-abi.sh` | build-time `struct mddev` / `bitmap_ops` ABI guard |
 
