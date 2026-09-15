@@ -446,6 +446,7 @@ from-tree mdadm:
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
 | `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
 | `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
+| `raidkm-test-ci.sh` | CI entry point — `--tier=smoke` (row-layer degraded read and rebuild, replace, declustered population, functional/degraded; ~25 min), `quick` (adds the stripe-path rebuild), `full` (`--allow-stop-all`, disposable hosts only); one exit status, `summary.txt`, JUnit `results.xml`, kernel-log scan per suite; refuses a host with other active md arrays. |
 | `raidkm-test-row-dread-wide.sh`, `raidkm-test-row-csum.sh` | row layer — a degraded span read once per row (unaligned spans, two failures, races, declustered), and native checksum verified and published through the row paths (poisoned survivors must be refused) |
 | `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
