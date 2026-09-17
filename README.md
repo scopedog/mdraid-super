@@ -68,11 +68,11 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
 
 ### Fast rebuild
 
-- **Parallel resync path.** raidkm's resync fans multiple stripes per
-  `sync_request` instead of walking one stripe-window at a time, so on a
-  CPU-bound array single-disk recovery runs ~2× stock at matched worker counts
-  and ~6× out of the box; on a disk-bound array (NVMe-oF) it is at parity with
-  stock (see *Rebuild / resync*).
+- **Row rebuild.** A classic rebuild onto a spare reads each chunk from the
+  survivors, decodes it once and writes it to the spare as one chunk-sized
+  write, instead of 4 KiB stripes.  Under a foreground read it serves 1.37× the
+  read of stock md tuned to the same knobs; on an idle array tuned stock's
+  stripe cache rebuilds faster (see *Performance*).
 - **Declustered rebuild (the wide-pool win).** With a distributed spare, a failed
   member is reconstructed across *every* survivor at once instead of funnelling
   into one replacement disk — **17.5× faster** on an 80-disk pool, and the array
@@ -141,11 +141,10 @@ it is off by default and mutually exclusive with the bitmap.
 
 Worker groups are **auto-enabled** (total threads default to `nproc/2`, spread
 one group per NUMA node) and zero-copy full-stripe writes (`skip_copy`) default
-**on** — stock md ships both off.  Together with a faster write/RMW/partial-stripe
-path, that is why raidkm beats stock RAID6 on every workload of the CPU-bound
-benchmarks (see *Performance*).  Where the drives are the limit — 8+2 on local
-NVMe — healthy workloads match stock and degraded reads lead (1.11× rotating,
-1.16× declustered) on a quarter of the cores.  Tunables: `worker_thread_cnt` / `group_thread_cnt`,
+**on** — stock md ships both off.  Those defaults are most of raidkm's lead over
+stock md on a healthy array: stock md with the same knobs set by hand keeps up
+with it.  raidkm's own gains are degraded reads and rebuilding under a
+foreground load (see *Performance*).  Tunables: `worker_thread_cnt` / `group_thread_cnt`,
 `stripe_cache_size`, and the `raidkm_csum_cache_pages` module parameter; the
 deployment checklist (pick `k` so `k × chunk` is a power of two, keep the
 filesystem journal off the array, align the partition to a row) is in
@@ -324,25 +323,35 @@ extra step.)
 
 ## Performance
 
-raidkm (md level 71) is **faster than stock RAID6 on every workload**.  Measured
-at m=2 (two parity disks — the RAID6-equivalent) with
-`tools/raidkm-standard-benchmark.sh --runs=3`, a 6-workload OLTP/IOPS suite (page
-cache dropped before each test, both arrays created `--assume-clean`), on 6 brd
-ramdisks, k=4 m=2, 512 KiB chunk, **RHEL 10.2** (`6.12.0-211.22.1.el10_2`).
-Re-measured 2026-06-15 across the SIMD spectrum (IOPS, mean of 3 runs;
-integrity-checked, `mismatch_cnt=0` everywhere):
+Stock md as it ships, stock md with raidkm's defaults set by hand
+(`group_thread_cnt`, `stripe_cache_size=1024`, `skip_copy=1`), and raidkm, on the
+same members in one run (2026-09-17): 8+2, 128 KiB chunk, GCP `n2-standard-32`,
+Rocky 10 stock kernel `6.12.0-211.16.1`, `tools/raidkm-ab-benchmark.sh
+--arms=raid6,raid6+tuned,raidkm2 --degraded --rebuild --rebuild-load=seqread`.
+**NVMe** = 10 GCP local SSDs, preconditioned, 4 ABBA rounds; **null_blk** = 10
+memory-backed devices, where the members are never the limit, 2 rounds.
 
-| Test | base / no-GFNI<br>(Ryzen 5800X) | AVX2-GFNI<br>(i5-1340P) | AVX-512-GFNI<br>(Xeon 8481C, 8 vCPU) |
-|---|---|---|---|
-| 1 Random 4K Write         | 239,211 vs 124,327 (**1.92×**) | 107,728 vs 46,615 (**2.31×**) | 305,853 vs 72,767 (**4.20×**) |
-| 2 DB Mixed 8K (75/25)     | 420,982 vs 275,658 (**1.53×**) | 182,964 vs 96,838 (**1.89×**) | 504,563 vs 157,899 (**3.20×**) |
-| 3 High Concurrency 4K rw  | 555,725 vs 410,337 (**1.35×**) | 219,223 vs 135,716 (**1.62×**) | 818,197 vs 220,291 (**3.71×**) |
-| 4 OLTP 16K rw             | 222,370 vs 124,760 (**1.78×**) | 88,546 vs 42,677 (**2.07×**) | 266,346 vs 73,455 (**3.63×**) |
-| 5 Partial Stripe Write 8K | 179,735 vs 73,994 (**2.43×**) | 59,135 vs 24,053 (**2.46×**) | 159,960 vs 43,837 (**3.65×**) |
+| | NVMe: stock | tuned stock | raidkm | null_blk: stock | tuned stock | raidkm |
+|---|---|---|---|---|---|---|
+| Healthy random 4K write, IOPS | 57,457 | 130,552 | 133,652 | 59,050 | 276,177 | 288,363 |
+| Healthy OLTP 70/30 16K, IOPS | 60,276 | 117,517 | 116,782 | 55,553 | 352,915 | 340,187 |
+| Degraded sequential 1 MiB read, MiB/s | 1,686 | 5,623 | **6,251** | 1,420 | 8,342 | **10,105** |
+| Degraded random 4K read, IOPS | 110,352 | 212,131 | **302,935** | 135,803 | 426,055 | **762,303** |
+| Rebuild, idle array, MiB/s | 235 | **382** | 261 | 170 | **606** | 519 |
+| Rebuild under a sequential read, MiB/s | 107 | **196** | 148 | 45 | 197 | **421** |
+| … and the foreground read, MiB/s | 758 | 3,636 | **4,982** | 1,027 | 7,663 | **10,402** |
 
-(Each cell is *raidkm vs stock raid6* IOPS and the speedup.)  The win is
-**structural** — the forked `raid5.c` carries worker-group auto-default, a
-`STRIPE_ON_INACTIVE_LIST` lock-skip, and a faster write/RMW/partial-stripe path.
+- **Healthy array:** the gain over stock is the defaults.  Tuned stock comes
+  within 6% of raidkm on every workload of the suite.
+- **Degraded:** raidkm reads a failed member's data as whole rows, decoded
+  once: 1.43× (NVMe) and 1.79× (null_blk) tuned stock on random read.
+- **Rebuild:** on an idle array tuned stock is fastest (raidkm's row rebuild
+  runs 4 rows at a time; on null_blk it gets 86% of the rate on half the cores).
+  Under a foreground read raidkm serves 1.37× tuned stock's read, and on null_blk
+  also rebuilds 2.1× faster.
+
+Every workload, p99 latency, busy cores and the per-round runs:
+[`md-kmec/README.md`](../md-kmec/README.md#benchmark--raidkm-vs-stock-raid6).
 
 ### Native checksums: verified integrity at ~no cost
 
@@ -370,44 +379,9 @@ lockdep kernel — functional 12/12, csum-thrash, self-heal 60/60, randrw churn
 read/write invariant `WARN_ON` (a read overlapping a draining zero-copy write is
 now deferred in `need_this_block`), plus two 4K-logical-device harness bugs.
 
-> The ratio **scales with core count**; it is not a fixed per-machine constant.
-> raidkm's worker groups parallelize stripe handling (total threads auto-default
-> to `nproc/2`) while stock RAID6's RMW path is largely serial.  At m=2 parity is
-> the `raid6_call` P+Q fast path, so **GFNI does not change the m=2 numbers** — the
-> three columns differ as much by vCPU count as by SIMD tier; GFNI's encode
-> advantage shows at **m ≥ 3**.  brd is RAM-backed, so these isolate the CPU-side
-> win; real disks narrow the gap on device-bound workloads.
-
-### Rebuild / resync
-
-raidkm rebuilds a failed disk **substantially faster** because its resync path
-fans multiple stripes per `sync_request` instead of walking one stripe-window at
-a time.  Single-disk recovery, 6 × brd, k=4 m=2, 3 GiB/disk, GCP `c3-standard-8`
-(8 vCPU, Xeon 8481C), resync governor unthrottled:
-
-| `group_thread_cnt` | stock raid6 | raidkm m=2 |
-|---|---|---|
-| 0 (stock default) | ~200 MB/s | **1178 MB/s** (5.9×) |
-| 4 (matched)       | ~585 MB/s | **1178 MB/s** (2.0×) |
-
-raidkm's rebuild rate is **independent of `group_thread_cnt`** (the parallelism
-is in the sync path itself): ~2× apples-to-apples at matched `gtc=4`, ~6× out of
-the box (stock ships worker groups off).  *(brd is compute-bound; on real disks
-the rebuild is capped by write bandwidth, so the gap narrows.)*
-
-On a disk-bound array the gap closes: an independent evaluation over NVMe-oF
-with QLC namespaces (k=8 m=2, 128 KiB chunk) measured raidkm and stock raid6 at
-parity at every matched worker count (535 vs 545 MiB/s at `group_thread_cnt`
-32).  Both engines rebuild in ~4 KiB stripe units there; treat the 2× / 6×
-figures as the CPU-bound ceiling.
-
-Full detail — per-core scaling, `worker_thread_cnt` tuning, and the reproduction
-recipe — is in
-[`md-kmec/README.md`](../md-kmec/README.md#benchmark--raidkm-vs-stock-raid6).
-
 ### Declustered rebuild (wide pools)
 
-For **wide** pools, the bigger rebuild win comes from `--layout=declustered`: a
+For **wide** pools, the big rebuild win comes from `--layout=declustered`: a
 narrow `k+m` stripe is scattered over the whole disk pool with a **distributed
 spare**, so a failed member is reconstructed across *every* survivor at once
 instead of funnelling through one replacement. On real NVMe, rebuilding a failed
@@ -452,10 +426,10 @@ from-tree mdadm:
 | `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
-| `raidkm-standard-benchmark.sh` | throughput benchmark (7 workloads incl. 1 MiB sequential), with the request size reaching the member devices per workload |
+| `raidkm-standard-benchmark.sh` | throughput benchmark (8 workloads incl. 1 MiB sequential and 4 KiB random read), with the request size reaching the member devices and host busy cores per workload; optional degraded phase (`--degraded-victim`), rebuild wall-clock (`--rebuild-victim`) and rebuild under a foreground load (`--rebuild-load`) |
 | `raidkm-bench-iosize.sh` | request size and merge share at the members per I/O state (healthy, degraded, rebuild, declustered populate / copy-back) on a `null_blk` rig or real devices (`--devs`), optionally with native checksum (`--checksum`) — the check for flash with a large indirection unit |
 | `raidkm-member-stats.sh` | sourced helper: resolves an array to the devices carrying its member requests (NVMe multipath paths included) |
-| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`, declustered `dcl<M>`; ABBA order with a discarded warm-up pass (the first run on fresh flash reads high) and optional steady-state preconditioning, ratio tables plus every run in execution order; `--dry-run` prints every command first |
+| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`, declustered `dcl<M>`, and `<arm>+tuned` (stock with raidkm's default knobs, for stock / tuned stock / raidkm in one run); `--degraded`, `--rebuild`, `--rebuild-load`; ABBA order with a discarded warm-up pass (the first run on fresh flash reads high) and optional steady-state preconditioning, ratio tables plus every run in execution order; `--dry-run` prints every command first |
 | `raidkm-create.sh`, `raidkm-convert.sh` | create / convert helpers |
 | `check-mddev-abi.sh` | build-time `struct mddev` / `bitmap_ops` ABI guard |
 
