@@ -345,8 +345,9 @@ memory-backed devices, where the members are never the limit, 2 rounds.
   within 6% of raidkm on every workload of the suite.
 - **Degraded:** raidkm reads a failed member's data as whole rows, decoded
   once: 1.43× (NVMe) and 1.79× (null_blk) tuned stock on random read.
-- **Rebuild:** on an idle array tuned stock is fastest (raidkm's row rebuild
-  runs 4 rows at a time; on null_blk it gets 86% of the rate on half the cores).
+- **Rebuild:** on an idle array tuned stock was fastest here (the row rebuild
+  then ran 4 rows at a time).  It now runs 8 by default: 279 → 386 MiB/s idle
+  on the NVMe, 459 → 757 MiB/s on null_blk (details in md-kmec's README).
   Under a foreground read raidkm serves 1.37× tuned stock's read, and on null_blk
   also rebuilds 2.1× faster.
 
