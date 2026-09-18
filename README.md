@@ -70,9 +70,16 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
 
 - **Row rebuild.** A classic rebuild onto a spare reads each chunk from the
   survivors, decodes it once and writes it to the spare as one chunk-sized
-  write, instead of 4 KiB stripes.  Under a foreground read it serves 1.37× the
-  read of stock md tuned to the same knobs; on an idle array tuned stock's
-  stripe cache rebuilds faster (see *Performance*).
+  write, 8 rows at a time, instead of 4 KiB stripes.  Under a foreground read it
+  serves 1.37× the read of stock md tuned to the same knobs; on an idle array
+  tuned stock's stripe cache rebuilds faster (see *Performance*).  How the
+  rebuild shares a busy array is now a choice: `rk_row_rebuild_workers` sets how
+  many rows rebuild at once (8 by default, worth 2× the rebuild rate at 32 rows
+  for 18% of the foreground IOPS where the drives have headroom), and
+  `rk_row_rebuild_pace` caps the rebuild in KB/s while foreground I/O is
+  present — which md's own `sync_speed_min` cannot do on this path, because it
+  throttles by waiting for outstanding sync I/O that a finished band no longer
+  has.
 - **Declustered rebuild (the wide-pool win).** With a distributed spare, a failed
   member is reconstructed across *every* survivor at once instead of funnelling
   into one replacement disk — **17.5× faster** on an 80-disk pool, and the array
