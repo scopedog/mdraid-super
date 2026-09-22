@@ -79,14 +79,30 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
   `rk_row_rebuild_pace` caps the rebuild in KB/s while foreground I/O is
   present — which md's own `sync_speed_min` cannot do on this path, because it
   throttles by waiting for outstanding sync I/O that a finished band no longer
-  has.
+  has.  The engine also runs a look-ahead window ahead of md's cursor
+  (`rk_row_rebuild_window`, 64 chunks by default; 0 restores the synchronous
+  bands) instead of idling for every round trip through md's sync loop: on 8+2
+  NVMe a rebuild under a sequential read goes from 88 to 134 MiB/s for 8% of
+  that read, and an idle one from 51.5 to 46.2 s per 16 GiB member.
 - **Declustered rebuild (the wide-pool win).** With a distributed spare, a failed
   member is reconstructed across *every* survivor at once instead of funnelling
   into one replacement disk — **17.5× faster** on an 80-disk pool, and the array
   is never fully degraded while it happens.  Population is a raidkm-owned sync
   action (`rk_dcl_populate`, or automatic via `rk_dcl_auto=1`) with a crash-safe
   journaled progress mark, and supports **sequential multi-assignment** (up to
-  `s` failed disks, resolved through chained redirects).
+  `s` failed disks, resolved through chained redirects).  `rk_dcl_row_rebuild`
+  (off by default while it is gated) hands the population to the row-rebuild
+  workers, so each row's spare column is written whole: on real NVMe the
+  members see **115.7 KiB** per write instead of 6.4 KiB, 18× fewer requests,
+  at 8.6 s per 4 GiB member with 32 workers against the stripe path's 7.3 s.
+- **Foreground writes never wait on the preread throttle.**  md parks a stripe
+  that needs prereads on `delayed_list` until no preread is active anywhere,
+  which a saturating O_DIRECT load prevents for as long as it lasts — so a write
+  that lands on a stripe whose preread token an earlier write already spent can
+  wait for the load to end, and anything overlapping it waits too.  Measured on
+  8+2 NVMe under a 4 KiB random write with a rebuild running: a write blocked
+  **148 s** before, **69 ms** after, with 21% more foreground IOPS; stock md
+  blocked one for **60 s** on the same load, so the fix is going upstream too.
 - **Rebalance by copy, not decode.** Adding a replacement disk migrates the data
   back with a 16-worker parallel **copy-from-spare** — no GF decode, no degraded
   window — falling back to the decode leg on any persistent copy fault.
@@ -437,7 +453,7 @@ from-tree mdadm:
 | `raidkm-standard-benchmark.sh` | throughput benchmark (8 workloads incl. 1 MiB sequential and 4 KiB random read), with the request size reaching the member devices and host busy cores per workload; optional degraded phase (`--degraded-victim`), rebuild wall-clock (`--rebuild-victim`) and rebuild under a foreground load (`--rebuild-load`) |
 | `raidkm-bench-iosize.sh` | request size and merge share at the members per I/O state (healthy, degraded, rebuild, declustered populate / copy-back) on a `null_blk` rig or real devices (`--devs`), optionally with native checksum (`--checksum`) — the check for flash with a large indirection unit |
 | `raidkm-member-stats.sh` | sourced helper: resolves an array to the devices carrying its member requests (NVMe multipath paths included) |
-| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`, declustered `dcl<M>`, and `<arm>+tuned` (stock with raidkm's default knobs, for stock / tuned stock / raidkm in one run); `--degraded`, `--rebuild`, `--rebuild-load`; ABBA order with a discarded warm-up pass (the first run on fresh flash reads high) and optional steady-state preconditioning, ratio tables plus every run in execution order; `--dry-run` prints every command first |
+| `raidkm-ab-benchmark.sh` | A/B benchmark against stock md on the same disks — raw member, `raid6`, the distro's in-tree `raid6-intree`, `raidkm<M>`, declustered `dcl<M>`, and `<arm>+tuned` (stock with raidkm's default knobs, for stock / tuned stock / raidkm in one run); `--degraded`, `--rebuild`, `--rebuild-load`; ABBA order with a discarded warm-up pass (the first run on fresh flash reads high) and optional steady-state preconditioning, ratio tables plus every run in execution order, headed by the host it ran on (CPU model, online CPUs, NUMA nodes) with hypervisor steal recorded per workload — the same machine type is not the same machine, and one workload read 0.86× and 0.99× on two instances a few hours apart with bit-identical modules; `--dry-run` prints every command first |
 | `raidkm-rig-nvme.sh` | carve a real-disk rig for the suites — members of the size they are calibrated for (default 256 MiB, matching the ram disks they otherwise build), one per namespace, stale superblocks zeroed, and the `RK_DEVS` line printed. Whole-namespace or oversized members make every create resync the whole disk, which is what pushed `replace` past its budget on the first real-NVMe tier. Refuses a disk that is mounted, in swap, an LVM PV or held by md; needs `--yes` |
 | `raidkm-create.sh`, `raidkm-convert.sh` | create / convert helpers |
 | `check-mddev-abi.sh` | build-time `struct mddev` / `bitmap_ops` ABI guard |
