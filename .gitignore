@@ -4,3 +4,6 @@
 build/
 specs/selkie/
 target/
+
+# mob resolves this from its own copy; a file here would shadow it.
+specs/lib/mob-schema.ncl

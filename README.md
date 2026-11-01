@@ -149,6 +149,48 @@ no live block is ever overwritten before its replacement is durable.  Shrinks
 walk the same engine **backwards**.  Native-checksum arrays reshape too (CRCs are
 re-keyed with the data).  Freed members drop out as spares.
 
+### Native snapshots and the row state map
+
+- **Row state map** (`mdadm --create … --row-map`, a create option) — raidkm
+  keeps a 2-bit state per row (unwritten / needs sync / written) in a small
+  reserve at each member's tail, so a new array needs no initial resync, and
+  rebuild, resync and check skip the rows that hold no data.  On a live array,
+  `/sys/block/mdX/md/rk_rowmap` shows the row counts per state and what the
+  passes skipped.
+- **Native read-only snapshots** (`mdadm --create … --snapshots=<reserve %>`,
+  implies `--row-map`) — the array exports (100 − reserve)% of its rows, and the
+  first write to a row a snapshot still shares is redirected, whole, to a reserve
+  row: a full-row write goes there as it is, a partial one is merged into a copy
+  of the old row.  No thin-pool layer and no second metadata device.  Snapshots
+  form a linear chain, each a read-only block device `/dev/mdXs<id>`; a create
+  freezes a mounted filesystem for its consistent point.
+- **Crash safe** — every change goes to a journal on each member before the
+  write that needed a copy is acknowledged; checkpoints, and a replay at
+  assemble, bring the snapshots back after a stop, crash or power cut
+  (power-cut tested: every snapshot's content survives every cut, degraded
+  too).  When the reserve is full, a write that needs a copy fails with ENOSPC
+  and the snapshots stay intact.  Opt-in: an array created without
+  `--snapshots` is unchanged.  Not yet with native checksums, declustered parity
+  or a reshape.  `/sys/block/mdX/md/rk_snap` shows the origin and reserve rows,
+  the copy and journal counters and the snapshots; each snapshot disk has its
+  own `/sys/block/mdXs<id>/rk_snap/`.
+
+| Command | Effect |
+|---|---|
+| `mdadm --snapshot <array> --create <name> [--attr k=v]...` | take a snapshot, with attributes |
+| `mdadm --snapshot <array> --destroy <name>` | remove it; its rows go back to the reserve (and unwritten in the row map) |
+| `mdadm --snapshot <array> --rename <old> <new>`, `--set <name> k=v...` | rename it, set attributes |
+| `mdadm --snapshot <array> --list [<name>] [--export]`, `--exists <name>` | list (name, id, ctime, device, rows held, attributes); test |
+| `mdadm --snapshot <array> --checkpoint` | write a checkpoint now |
+
+On a RAM-backed 8+2 array with 128 KiB chunks, against dm-thin over a plain
+raidkm array on the same members (thin block = one row), the first write pass
+after a snapshot is faster than dm-thin's — ~10% more IOPS on 4 KiB random
+writes, ~35% more throughput on 1 MiB sequential writes — with the same member
+bytes; later passes run as without a snapshot.  States, limits, the on-disk
+layout and space are in
+[`md-kmec/README.md`](../md-kmec/README.md#row-state-map-and-native-snapshots).
+
 ### Degraded operation and repair
 
 Degraded reads, degraded **writes**, and degraded scrub all work up to m
@@ -239,15 +281,20 @@ check is skipped with a warning and the build continues.)
 
 - **OS auto-detection.** `make` picks the target from the kernel release and
   passes it down to `md-kmec`, so the two cannot disagree.  Override with
-  `make TARGET=rhel10|rhel9|vanilla` — useful when `KDIR` points at a kernel
-  whose release string lacks the distro suffix (a locally built debug kernel,
-  say).
+  `make TARGET=rhel10|rhel9|rhel98|vanilla` — useful when `KDIR` points at a
+  kernel whose release string lacks the distro suffix (a locally built debug
+  kernel, say).
   - **RHEL 10** (`.el10`): ships a forked, builtin md core, so the full
     `kernel/` md fork is built (`isal_lib.ko`, `raid456.ko`, …) and `md-kmec`
     compiles against it.
   - **RHEL 9** (`.el9`): the distro's own `md_mod` provides md, so only
-    `kernel/isa-l` is built; `md-kmec` compiles against its vendored
-    `md-rhel9/` headers and `compat-rhel9.h`.  Validated under KASAN + lockdep.
+    `kernel/isa-l` is built; `md-kmec` compiles against its vendored headers
+    for the release — `md-rhel9/` + `compat-rhel9.h` on 9.7, `md-rhel98/` +
+    `compat-rhel98.h` on 9.8 (9.8 moved `struct mddev`), picked by `md-kmec`
+    from the kernel release (`.el9_8`) within `TARGET=rhel9`; a 9.8-based
+    kernel without that suffix (CentOS Stream 9 `5.14.0-687.el9`, a local
+    build) takes `TARGET=rhel98`.  The ABI check below verifies whichever set
+    was picked.  Validated under KASAN + lockdep.
   - **Debian / Ubuntu / mainline**: same shape as RHEL 9 — distro `md_mod`,
     only `kernel/isa-l` built, `md-kmec` against its vendored vanilla `md.h`.
 
@@ -444,11 +491,13 @@ from-tree mdadm:
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
 | `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
 | `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
-| `raidkm-test-ci.sh` | CI entry point — `--tier=smoke` (row-layer degraded read and rebuild, replace, declustered population, functional/degraded; ~25 min), `quick` (adds the stripe-path rebuild), `full` (`--allow-stop-all`, disposable hosts only), `nightly` (quick + the three independent-tool suites below; debug kernel, `--allow-stop-all`); a suite whose kernel or host lacks what it needs — or whose device count the rig cannot meet — reports `skip` with the reason, and a single check whose premise the hardware denies (a sub-block read on a 4 KiB-logical member) is counted as skipped rather than failed, with the count in the suite's note; a tier in which *every* suite skipped fails, so a mis-specified rig cannot pass by testing nothing; one exit status, `summary.txt`, JUnit `results.xml`, kernel-log scan per suite, and each real member's size and block sizes in `env.txt`; refuses a host with other active md arrays. |
+| `raidkm-test-ci.sh` | CI entry point — `--tier=smoke` (functional/degraded; the row layer: degraded read, native checksum, rebuild under load, replace, wide rows, full-row writes, resync/check/repair through `rk_row_sync`; declustered population and degraded; scrub with bad blocks, trust-disk, the tunables; ~18 min for 15 suites on the CI VM, measured at this pin), `quick` (adds the stripe-path rebuild), `full` (`--allow-stop-all`, disposable hosts only), `nightly` (quick + the three independent-tool suites below; debug kernel, `--allow-stop-all`); a suite whose kernel or host lacks what it needs — or whose device count the rig cannot meet — reports `skip` with the reason, and a single check whose premise the hardware denies (a sub-block read on a 4 KiB-logical member) is counted as skipped rather than failed, with the count in the suite's note; a tier in which *every* suite skipped fails, so a mis-specified rig cannot pass by testing nothing; one exit status, `summary.txt`, JUnit `results.xml`, per suite `<suite>.log`, `<suite>.dmesg` (its whole kernel log) and `<suite>.tail.dmesg` (what the suite did not clear itself, the log the verdict scans), and each real member's size and block sizes in `env.txt`; refuses a host with other active md arrays. |
 | `raidkm-test-faultinject.sh`, `raidkm-test-xfstests.sh`, `raidkm-test-mdadm-suite.sh` | nightly tier — the kernel's own fault injection (member I/O errors, allocation failures, I/O timeouts) under fsx/fsstress on ext4; xfstests on ext4 over raidkm healthy and degraded (`XFSTESTS_DIR`); mdadm's own raid6 tests adapted to raidkm (stops every array and detaches every loop device) |
 | `raidkm-test-row-dread-wide.sh`, `raidkm-test-row-csum.sh` | row layer — a degraded span read once per row (unaligned spans, two failures, races, declustered), and native checksum verified and published through the row paths (poisoned survivors must be refused) |
 | `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices, and the row layer across spare-assignment transitions (off while POPULATING/COPYING, live while steady and degraded, data intact across a rebalance) |
 | `raidkm-test-grow*.sh`, `raidkm-test-reshape-*.sh` | grow/reshape (data + parity) |
+| `raidkm-test-rowmap.sh` | the row state map — rows unwritten / needs sync / written, persistence, rebuild and resync skipping, the bitmap coming clean, a dirty degraded start refused |
+| `raidkm-test-snap.sh`, `raidkm-test-snap-persist.sh` | native snapshots — content across a chain and destroys, a snapshot of a mounted ext4 under load, the copy paths' corner cases, a listing past one page; persistence across stop, journal replay, ring wraps, degraded and rebuilt members, damaged metadata copies, a full reserve |
 | `raidkm-test-soak.sh`, `raidkm-test-crash.sh` | soak and crash-consistency |
 | `raidkm-standard-benchmark.sh` | throughput benchmark (8 workloads incl. 1 MiB sequential and 4 KiB random read), with the request size reaching the member devices and host busy cores per workload; optional degraded phase (`--degraded-victim`), rebuild wall-clock (`--rebuild-victim`) and rebuild under a foreground load (`--rebuild-load`) |
 | `raidkm-bench-iosize.sh` | request size and merge share at the members per I/O state (healthy, degraded, rebuild, declustered populate / copy-back) on a `null_blk` rig or real devices (`--devs`), optionally with native checksum (`--checksum`) — the check for flash with a large indirection unit |

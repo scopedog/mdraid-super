@@ -32,19 +32,23 @@ KDIR ?= /lib/modules/$(KVER)/build
 # there we build ONLY isa-l from the fork (for isal_lib.ko + the EC symbols
 # raidkm links against), and raidkm compiles against its vendored md headers
 # for that flavour (md-rhel9/ or md-vanilla/) plus the matching compat shim.
+# RHEL 9.8: within TARGET=rhel9, md-kmec picks md-rhel98/ + compat-rhel98.h
+# from the KVER we pass down (".el9_8"); TARGET=rhel98 forces them for a
+# 9.8-based kernel whose release lacks that (CentOS Stream 9, a local build).
 #
 # This detection mirrors md-kmec's own, and TARGET is passed down to it, so
-# the two cannot disagree.  Override with TARGET=rhel10|rhel9|vanilla — useful
-# when KDIR points at a kernel whose release string lacks the distro suffix
-# (e.g. a locally built debug kernel).
+# the two cannot disagree.  Override with TARGET=rhel10|rhel9|rhel98|vanilla
+# — useful when KDIR points at a kernel whose release string lacks the distro
+# suffix (e.g. a locally built debug kernel).
 TARGET ?= $(if $(findstring .el9,$(KVER)),rhel9,$(if $(findstring .el,$(KVER)),rhel10,vanilla))
 ifeq ($(TARGET),rhel10)
 KMOD           := kernel
 INSTALL_KERNEL := install-kernel
 LVM2_KMOD      :=
-else ifeq ($(TARGET),rhel9)
-# Distro md core, as on vanilla — only the md-kmec side differs (md-rhel9/ +
-# compat-rhel9.h, selected by the TARGET we pass down).  The dm-raid/LVM path
+else ifneq ($(filter rhel9 rhel98,$(TARGET)),)
+# Distro md core, as on vanilla — only the md-kmec side differs: md-rhel9/ +
+# compat-rhel9.h, or md-rhel98/ + compat-rhel98.h on 9.8 (md-kmec picks them
+# from the TARGET and KVER we pass down, see above).  The dm-raid/LVM path
 # is NOT wired up here: dm-raid-ko builds against md-vanilla/ + compat-vanilla.h,
 # which is wrong for a 5.14 kernel.  Hence LVM2_KMOD is empty and dm-raid-ko
 # refuses to run (see below).
@@ -116,7 +120,7 @@ lvm2: $(LVM2_KMOD)
 # Load it in place of the stock module (see README) — it is NOT auto-installed.
 DMRAID_KO_DIR := $(TOP)/build/dm-raid-vanilla
 dm-raid-ko:
-	@test "$(TARGET)" = vanilla || { echo "dm-raid-ko: vanilla/mainline only — it builds against md-vanilla/ + compat-vanilla.h. RHEL 10 already has raidkm dm-raid in the kernel/ fork; RHEL 9 is not wired up (would need md-rhel9/ + compat-rhel9.h)."; exit 1; }
+	@test "$(TARGET)" = vanilla || { echo "dm-raid-ko: vanilla/mainline only — it builds against md-vanilla/ + compat-vanilla.h. RHEL 10 already has raidkm dm-raid in the kernel/ fork; RHEL 9 is not wired up (would need md-rhel9/ + compat-rhel9.h, or md-rhel98/ + compat-rhel98.h on 9.8)."; exit 1; }
 	@mkdir -p $(DMRAID_KO_DIR)
 	cp -f $(KERNEL)/md/dm-raid.c $(DMRAID_KO_DIR)/dm-raid.c
 	printf 'obj-m += dm-raid.o\nccflags-y += -I$(MDKMEC)/md-vanilla\n' > $(DMRAID_KO_DIR)/Kbuild
