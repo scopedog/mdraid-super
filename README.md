@@ -170,7 +170,8 @@ re-keyed with the data).  Freed members drop out as spares.
   (power-cut tested: every snapshot's content survives every cut, degraded
   too).  When the reserve is full, a write that needs a copy fails with ENOSPC
   and the snapshots stay intact.  Opt-in: an array created without
-  `--snapshots` is unchanged.  Not yet with native checksums, declustered parity
+  `--snapshots` is unchanged.  Declustered pools included (the copy unit is a
+  whole declustered row, every group's data).  Not yet with native checksums
   or a reshape.  `/sys/block/mdX/md/rk_snap` shows the origin and reserve rows,
   the copy and journal counters and the snapshots; each snapshot disk has its
   own `/sys/block/mdXs<id>/rk_snap/`.
