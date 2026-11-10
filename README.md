@@ -253,7 +253,7 @@ behind an explicit `sudo make install-dm-raid` (see *Via LVM* below).
 If you cloned without `--recurse-submodules`, run `./bootstrap.sh` (it inits the
 submodules and builds). `./bootstrap.sh install` builds and installs.
 
-The same `make` works on **RHEL 9, RHEL 10 and Debian/Ubuntu** — it auto-detects the
+The same `make` works on **RHEL 9, RHEL 10, Ubuntu and Debian** — it auto-detects the
 target from the running kernel (see *OS auto-detection* below).
 
 ### Prerequisites
@@ -270,7 +270,8 @@ sudo dnf install kernel-devel-$(uname -r) gcc make elfutils-libelf-devel openssl
 sudo dnf install kernel-devel-$(uname -r) gcc make elfutils-libelf-devel openssl dwarves
 ```
 
-**Debian 13 "trixie" / Ubuntu** (kernel 6.12; uses the distro's own md core):
+**Ubuntu 26.04** (kernel 7.0; the flavours listed below) and **Debian 13
+"trixie"** (kernel 6.12); both use the distro's own md core:
 
 ```sh
 sudo apt-get install build-essential linux-headers-$(uname -r) dwarves
@@ -283,8 +284,9 @@ check is skipped with a warning and the build continues.)
 ## Build details
 
 - **OS auto-detection.** `make` picks the target from the kernel release and
-  passes it down to `md-kmec`, so the two cannot disagree.  Override with
-  `make TARGET=rhel10|rhel9|rhel98|vanilla` — useful when `KDIR` points at a
+  passes it down to `md-kmec`, so the two cannot disagree (both use
+  `md-kmec/tools/detect-target.sh`).  Override with
+  `make TARGET=rhel10|rhel9|rhel98|ubuntu2604|vanilla` — useful when `KDIR` points at a
   kernel whose release string lacks the distro suffix (a locally built debug
   kernel, say).
   - **RHEL 10** (`.el10`): ships a forked, builtin md core, so the full
@@ -298,13 +300,20 @@ check is skipped with a warning and the build continues.)
     kernel without that suffix (CentOS Stream 9 `5.14.0-687.el9`, a local
     build) takes `TARGET=rhel98`.  The ABI check below verifies whichever set
     was picked.  Validated under KASAN + lockdep.
-  - **Debian / Ubuntu / mainline**: same shape as RHEL 9 — distro `md_mod`,
+  - **Ubuntu 26.04** (`7.0.0-<abi>-<flavour>`: generic, aws, azure,
+    azure-fde, gcp, gke, ibm, oracle, vmware, oem, nvidia, nvidia-bos): same
+    shape as RHEL 9 — md core is builtin and stock, so only `kernel/isa-l` is
+    built and `md-kmec` compiles against its vendored stock 7.0 headers
+    (`md-ubuntu2604/`).  Any other 7.x kernel, the `realtime` (PREEMPT_RT)
+    flavour included, is refused.
+  - **Debian / Ubuntu before 26.04 / mainline**: same shape as RHEL 9 — distro `md_mod`,
     only `kernel/isa-l` built, `md-kmec` against its vendored vanilla `md.h`.
 
-  `mdadm/` is independent userspace and builds on all three.  The dm-raid/LVM
+  `mdadm/` is independent userspace and builds on all of them (on gcc 15 the
+  Makefile adds `-Wno-error=unterminated-string-initialization` for it).  The dm-raid/LVM
   path is wired up for RHEL 10 (in the `kernel/` fork) and mainline
-  (`dm-raid-ko`), but **not** for RHEL 9 — `dm-raid-ko` builds against
-  `md-vanilla/`, which is wrong for 5.14, so it refuses to run there rather
+  (`dm-raid-ko`), but **not** for RHEL 9 or Ubuntu 26.04 — `dm-raid-ko` builds
+  against `md-vanilla/`, which is wrong there, so it refuses to run rather
   than produce a mismatched module.
 - **Target kernel.** Module builds default to the running kernel
   (`uname -r`). Override with `make KVER=<version> KDIR=<path>`. You need the
