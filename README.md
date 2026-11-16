@@ -34,20 +34,30 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
   common 2–8 range).  m=2 is the RAID6-equivalent case; m≥3 is something stock
   md cannot do at all.  Array width is bounded by the GF(2⁸) field, `k+m ≤ 255`,
   and is validated in practice out to **80-disk** arrays.
-- **One code for every m.** Parity is ISA-L's `gf_gen_rs_matrix` Reed-Solomon
-  code (Vandermonde to m=3, Cauchy above), so the m=2 image is a valid *prefix*
-  of the m≥3 encoding — that is what makes "add a parity disk" an incremental
-  operation rather than a rewrite.
+- **One code for every m.** Parity is ISA-L's Reed-Solomon code (Vandermonde,
+  `gf_gen_rs_matrix`, to m=3; Cauchy above), so the m=2 image is a valid
+  *prefix* of the m=3 encoding — that is what makes adding a third parity an
+  incremental operation rather than a rewrite.  Above m=3 the Cauchy rows share
+  no prefix (not even an all-ones P), and a change of m re-encodes the parity.
 - **m=2 is byte-identical to RAID6.** At m=2 the code's first two rows are
   exactly RAID6's P and Q, so raidkm encodes m=2 with raid6's tuned SIMD
-  (`raid6_call`) for full speed while writing bytes a stock RAID6 would write.
+  (`raid6_call`) for full speed while writing bytes a stock RAID6 would write
+  (the exception is a declustered group of width 3: with k=1 a stripe has
+  fewer disks than md's async P+Q helpers accept, so ISA-L encodes, updates
+  and scrubs it, writing the same bytes).
   That also makes **offline raid6 ↔ raidkm conversion** possible in place
   (`tools/raidkm-convert.sh`, `mdadm --raidkm-convert` — rotating layout, m=2:
   it rewrites the superblock, not the data).
 - **GFNI-accelerated, PSHUFB-free decode.** Every degraded read, rebuild and
   degraded write goes through one unified decode (build the survivor matrix,
-  `gf_invert_matrix`, apply with `ec_encode_data_*`), using AVX-512/AVX2 **GFNI**
-  when the CPU has it and a table-lookup fallback otherwise.  Decode deliberately
+  `gf_invert_matrix`, apply the decode row), using AVX-512/AVX2 **GFNI** when
+  the CPU has it, else ISA-L's scalar table-lookup code — except for the common
+  single-failure rows, which need no table: a row of 0/1 coefficients (a data
+  block from the other data and P, or P itself) runs as a plain `xor_blocks`
+  XOR, and a lost Q at m=2 (k≥2) through raid6's `gen_syndrome`
+  (`fast_decode` module parameter, default on only without GFNI).  More than
+  one lost block, a lost Q or R at m=3 and every row at m≥4 (a Cauchy
+  generator, with no all-ones P row) still use the table.  Decode deliberately
   avoids raid6's `*_recov` and ISA-L's PSHUFB kernels, keeping clear of the
   StreamScale patent surface.
 
@@ -81,31 +91,28 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
   because it throttles by waiting for outstanding sync I/O that a finished band
   no longer has.  The engine also runs a look-ahead window ahead of md's cursor
   (`rk_row_rebuild_window`, 64 chunks by default; 0 restores the synchronous
-  bands) instead of idling for every round trip through md's sync loop: on 8+2
-  NVMe a rebuild under a sequential read goes from 88 to 134 MiB/s for 8% of
-  that read, and an idle one from 51.5 to 46.2 s per 16 GiB member.
-- **Declustered rebuild (the wide-pool win).** With a distributed spare, a failed
-  member is reconstructed across *every* survivor at once instead of funnelling
-  into one replacement disk — **17.5× faster** on an 80-disk pool, and the array
-  is never fully degraded while it happens.  At the same usable capacity as
-  stock 8+2 on 10 of the 12 disks, a 12-disk declustered pool rebuilds 1.65×
-  faster than tuned stock when idle, and 1.03× faster under a foreground read
-  while serving 2.2× tuned stock's read.  Population is a raidkm-owned sync
-  action (`rk_dcl_populate`, or automatic via `rk_dcl_auto=1`) with a crash-safe
-  journaled progress mark, and supports **sequential multi-assignment** (up to
-  `s` failed disks, resolved through chained redirects).  `rk_dcl_row_rebuild`
-  (off by default while it is gated) hands the population to the row-rebuild
-  workers, so each row's spare column is written whole: on real NVMe the
-  members see **115.7 KiB** per write instead of 6.4 KiB, 18× fewer requests,
-  at 8.6 s per 4 GiB member with 32 workers against the stripe path's 7.3 s.
-- **Foreground writes never wait on the preread throttle.**  md parks a stripe
-  that needs prereads on `delayed_list` until no preread is active anywhere,
-  which a saturating O_DIRECT load prevents for as long as it lasts — so a write
-  that lands on a stripe whose preread token an earlier write already spent can
-  wait for the load to end, and anything overlapping it waits too.  Measured on
-  8+2 NVMe under a 4 KiB random write with a rebuild running: a write blocked
-  **148 s** before, **69 ms** after, with 21% more foreground IOPS; stock md
-  blocked one for **60 s** on the same load, so the fix is going upstream too.
+  bands) instead of idling for every round trip through md's sync loop.
+- **Declustered rebuild.** With a distributed spare, a failed member is
+  reconstructed across *every* survivor at once instead of funnelling into one
+  replacement disk, and the array is never fully degraded while it happens.  At
+  the same usable capacity as stock 8+2 on 10 of the 12 disks, a 12-disk
+  declustered pool rebuilds 1.65× faster than tuned stock when idle, and 1.03×
+  faster under a foreground read while serving 2.2× tuned stock's read.
+  Population is a raidkm-owned sync action (`rk_dcl_populate`, or automatic via
+  `rk_dcl_auto=1`) with a crash-safe journaled progress mark, and supports
+  **sequential multi-assignment** (up to `s` failed disks, resolved through
+  chained redirects).  It runs on the row-rebuild workers (`rk_dcl_row_rebuild`,
+  on by default), so each row's spare column is written whole in chunk-sized
+  writes instead of 4 KiB stripes.
+- **Foreground writes are not left parked by the preread throttle.**  md parks a
+  stripe that needs prereads on `delayed_list` until no preread is active
+  anywhere, which a saturating O_DIRECT load prevents for as long as it lasts —
+  so a write that lands on a stripe whose preread token an earlier write already
+  spent can wait for the load to end, and anything overlapping it waits too.
+  Two guards, both on by default: a stripe carrying a pending `REQ_SYNC` write
+  takes the token instead of being parked (`sync_write_nodelay`), and anything
+  else parked is activated after `delayed_max_age_ms` (100 ms) even while
+  prereads are active — a backstop rather than a deadline.
 - **Rebalance by copy, not decode.** Adding a replacement disk migrates the data
   back with a 16-worker parallel **copy-from-spare** — no GF decode, no degraded
   window — falling back to the decode leg on any persistent copy fault.
@@ -117,10 +124,8 @@ for each item is in [`md-kmec/README.md`](../md-kmec/README.md#status).
   dm-integrity stacking.  CRCs live in a reserved region at each member's tail
   (~0.1% of capacity) in self-checking pages, served through a bounded
   demand-paged cache; reads verify **inline in the bio completion**, including a
-  verified chunk-aligned read bypass.  Cost is **96–101% of the no-checksum
-  baseline** on real NVMe — ahead of dm-integrity in every mode but journal-mode
-  sequential read (table below).  In the 2026-11-13 run, turning them on cost
-  each layout at most 5% of its own throughput and rebuild rate, and the
+  verified chunk-aligned read bypass.  In the 2026-11-13 run, turning them on
+  cost each layout at most 5% of its own throughput and rebuild rate, and the
   declustered layout *with* checksums still clears tuned stock, which verifies
   nothing, on every item (see *Performance*).
 - **Checksum-driven self-healing.** An integrity-flagged read becomes an
@@ -215,13 +220,12 @@ it is off by default and mutually exclusive with the bitmap.
 
 Worker groups are **auto-enabled** (total threads default to `nproc/2`, spread
 one group per NUMA node) and zero-copy full-stripe writes (`skip_copy`) default
-**on** — stock md ships both off.  Those defaults are most of raidkm's lead over
-stock md on a healthy array: stock md with the same knobs set by hand keeps up
-with raidkm rotating.  raidkm's own gains are degraded reads, the foreground
-throughput it keeps while rebuilding, and — declustered — the rebuild rate
-(1.65× idle) and, from working the two drives the others leave idle, a
-healthy-array lead of up to 1.17× (see *Performance*).  Tunables:
-`worker_thread_cnt` / `group_thread_cnt`, `stripe_cache_size`, and the
+**on** — stock md ships both off.  On a healthy array, stock md with the same
+knobs set by hand keeps up with raidkm rotating.  raidkm's own gains are
+degraded reads, the foreground throughput it keeps while rebuilding, and —
+declustered — the rebuild rate (1.65× idle) and, from working the two drives
+the others leave idle, a healthy-array lead of up to 1.17× (see *Performance*).
+Tunables: `worker_thread_cnt` / `group_thread_cnt`, `stripe_cache_size`, and the
 `raidkm_csum_cache_pages` module parameter; the deployment checklist (pick `k`
 so `k × chunk` is a power of two, keep the filesystem journal off the array,
 align the partition to a row) is in
@@ -426,11 +430,18 @@ distributed spare columns (so declustering works 12 drives where the others work
 the 10-member arms then wipe it and add it back, a full recovery onto a blank
 disk as onto a spare, and the declustered arm populates its spare columns.  GCP
 `n2-standard-32`, 12 × 16 GiB of local NVMe, Rocky 10 kernel `6.12.0-211.74.1`,
-md-kmec `8c9a6d3` at its shipping defaults, no `--checksum` (the md-kmec pinned
-here changes nothing on the no-checksum data path since), preconditioned to
-steady state, a discarded warm-up pass, 2 ABBA rounds,
-`tools/raidkm-ab-benchmark.sh --arms=raid6@10+tuned,raidkm2@10,dcl2 --degraded
---rebuild --rebuild-load=seqread`.
+md-kmec `8c9a6d3` at its shipping defaults, no `--checksum` (declustered
+population on the row engine and both preread guards were already on by default
+there; on the no-checksum data path the md-kmec pinned here adds fast
+decode, which on CPUs without GFNI speeds raidkm's degraded reads and
+declustered population and cuts its rotating rebuild CPU, and an ISA-L path for
+declustered groups of width 3 at m=2, which this 8+2 run does not use; this
+instance was a Cascade Lake without GFNI, so the pinned release should do
+better on the degraded-read items, use fewer rebuild cores and may rebuild
+declustered arrays faster), preconditioned to steady state, a discarded warm-up
+pass, 2 ABBA rounds, `tools/raidkm-ab-benchmark.sh
+--arms=raid6@10+tuned,raidkm2@10,dcl2 --degraded --rebuild
+--rebuild-load=seqread`.
 
 | | tuned stock | raidkm rotating | raidkm declustered | best vs tuned stock |
 |---|---|---|---|---|
@@ -446,8 +457,7 @@ steady state, a discarded warm-up pass, 2 ABBA rounds,
 | … and the foreground read, MiB/s | 1,247 | 3,400 | 2,740 | |
 
 - **Every item:** the better layout is at least tuned stock on all of them,
-  both rebuild items included — the two where tuned stock led on NVMe, idle
-  and under a read, in the 2026-09-17 run below.
+  both rebuild items included.
 - **Rotating** matches tuned stock on a healthy array (0.99–1.03×), leads it
   1.09–1.44× degraded, and rebuilds an idle array at 1.04× on 0.7× the cores;
   under a foreground read it serves 2.7× tuned stock's read and rebuilds at
@@ -457,17 +467,23 @@ steady state, a discarded warm-up pass, 2 ABBA rounds,
 **With `--checksum=crc32c`**, raidkm verifies every block it reads and tuned
 stock verifies none.  This is a separate run of five arms — tuned stock, both
 layouts without checksums and both with them — on a second instance of the same
-type, with md-kmec's first two checksum CPU fixes (row CRCs computed outside the
-CRC cache's lock; raidkm's own `crc32c` transform, since RHEL's built-in
-libcrc32c stays on the generic CRC).  The md-kmec pinned here carries one more
-checksum fix since (row CRC lookups first, so only blocks with a stored CRC are
-CRC'd), which these numbers predate and which only removes work, plus fixes to
-the benchmark tool's error handling for `-csum` arms (a member it cannot size,
-an mdadm without `--checksum`) that landed after this run and do not change how
-the arms are built.  Every ratio below is against *this* run's tuned stock, so
-compare its columns with each other, not with the table above: an instance of
-the same type is not the same machine.  Same capacity-equalised arms, members
-and options as above: `tools/raidkm-ab-benchmark.sh
+type, with md-kmec `8c9a6d3` plus its first two checksum CPU fixes (row CRCs
+computed outside the CRC cache's lock; raidkm's own `crc32c` transform, since
+RHEL's built-in libcrc32c stays on the generic CRC), so as above, declustered
+population ran on the row engine and both preread guards were on by default.
+The md-kmec pinned here carries one more checksum fix since (row CRC
+lookups first, so only blocks with a stored CRC are CRC'd), which these
+numbers predate and which only removes work, plus fixes to the benchmark
+tool's error handling for `-csum` arms (a member it cannot size, an mdadm
+without `--checksum`) that landed after this run and do not change how
+the arms are built, fast decode, which on CPUs without GFNI speeds raidkm's
+degraded reads and declustered population and cuts its rotating rebuild CPU
+(this instance was a Cascade Lake without GFNI too, so the same holds as
+above), and an ISA-L path for declustered groups of width 3 at m=2, which this
+run does not use either.  Every ratio below is against *this* run's tuned
+stock, so compare its columns with each other, not with the table above: an
+instance of the same type is not the same machine.  Same capacity-equalised
+arms, members and options as above: `tools/raidkm-ab-benchmark.sh
 --arms=raid6@10+tuned,raidkm2@10,raidkm2-csum@10,dcl2,dcl2-csum --degraded
 --rebuild --rebuild-load=seqread`.
 
@@ -490,91 +506,26 @@ Every workload, p99 latency, busy cores and the per-round runs, in
 `md-kmec/README.md`: [without checksums](../md-kmec/README.md#current-release-vs-tuned-stock-both-layouts-2026-11-13),
 [with them](../md-kmec/README.md#with---checksum-against-tuned-stock-2026-11-13).
 
-### Stock as it ships vs tuned stock vs raidkm (2026-09-17)
-
-Stock md as it ships, stock md with raidkm's defaults set by hand
-(`group_thread_cnt`, `stripe_cache_size=1024`, `skip_copy=1`), and raidkm, on the
-same members in one run (2026-09-17): 8+2, 128 KiB chunk, GCP `n2-standard-32`,
-Rocky 10 stock kernel `6.12.0-211.16.1`, `tools/raidkm-ab-benchmark.sh
---arms=raid6,raid6+tuned,raidkm2 --degraded --rebuild --rebuild-load=seqread`.
-**NVMe** = 10 GCP local SSDs, preconditioned, 4 ABBA rounds; **null_blk** = 10
-memory-backed devices, where the members are never the limit, 2 rounds.
-
-| | NVMe: stock | tuned stock | raidkm | null_blk: stock | tuned stock | raidkm |
-|---|---|---|---|---|---|---|
-| Healthy random 4K write, IOPS | 57,457 | 130,552 | 133,652 | 59,050 | 276,177 | 288,363 |
-| Healthy OLTP 70/30 16K, IOPS | 60,276 | 117,517 | 116,782 | 55,553 | 352,915 | 340,187 |
-| Degraded sequential 1 MiB read, MiB/s | 1,686 | 5,623 | **6,251** | 1,420 | 8,342 | **10,105** |
-| Degraded random 4K read, IOPS | 110,352 | 212,131 | **302,935** | 135,803 | 426,055 | **762,303** |
-| Rebuild, idle array, MiB/s | 235 | **382** | 261 | 170 | **606** | 519 |
-| Rebuild under a sequential read, MiB/s | 107 | **196** | 148 | 45 | 197 | **421** |
-| … and the foreground read, MiB/s | 758 | 3,636 | **4,982** | 1,027 | 7,663 | **10,402** |
-
-- **Healthy array:** the gain over stock is the defaults.  Tuned stock comes
-  within 6% of raidkm on every workload of the suite.
-- **Degraded:** raidkm reads a failed member's data as whole rows, decoded
-  once: 1.43× (NVMe) and 1.79× (null_blk) tuned stock on random read.
-- **Rebuild:** on an idle array tuned stock was fastest here (the row rebuild
-  then ran 4 rows at a time).  In a later A/B of its own, 8 rows took an idle
-  rebuild from 279 to 386 MiB/s on the NVMe and from 459 to 757 MiB/s on
-  null_blk (details in md-kmec's README); the default is 16 now, and the
-  2026-11-13 table above has the current NVMe rebuild against tuned stock.
-  Under a foreground read raidkm served 1.37× tuned stock's read, and on
-  null_blk also rebuilt 2.1× faster.
-
-Every workload, p99 latency, busy cores and the per-round runs:
-[`md-kmec/README.md`](../md-kmec/README.md#stock-as-it-ships-vs-tuned-stock-vs-raidkm-2026-09-17).
-
-### Native checksums: verified integrity at ~no cost
-
-raidkm's built-in per-4K CRC-32C (`mdadm --create … --checksum=crc32c`, alias `--integrity`)
-verifies every read inline in the bio completion.  On real hardware (8 × local
-NVMe SSD, m=2, fio direct iodepth=32; percentages vs the same array with
-checksums off):
-
-| Workload | no checksum | **native checksum** | dm-integrity journal | dm-integrity bitmap |
-|---|---|---|---|---|
-| Seq write (MB/s)  | 2245 | **2264 (101%)** | 1088 (48%) | 2230 (99%) |
-| Rand write (K IOPS) | 97.2 | **93.2 (96%)** | 40.8 (42%) | 78.5 (81%) |
-| Seq read (MB/s)   | 5626 | **5599 (99.5%)** | 5624 (100%) | 5014 (89%) |
-| Rand read (K IOPS) | 1236.2 | **1235.9 (100.0%)** | 978.0 (79%) | 934.4 (76%) |
-
-Ahead of dm-integrity bitmap on all four workloads, ahead of journal on writes
-and random read, tying it on sequential read — with zero false mismatches.
-(Journal is crash-atomic, a stronger guarantee than native/bitmap, which
-recompute checksums after an unclean shutdown.)  Full setup + design:
-`md-kmec/README.md` and `md-kmec/notes/native-checksum-read-redesign-2026-07-14.md`.
-
-**Real-NVMe re-gated (2026-07-15)** on 4K-logical local-SSD NVMe under a KASAN +
-lockdep kernel — functional 12/12, csum-thrash, self-heal 60/60, randrw churn
-0 WARNs, 0 splats. The re-gate found and fixed a `skip_copy` × native-checksum
-read/write invariant `WARN_ON` (a read overlapping a draining zero-copy write is
-now deferred in `need_this_block`), plus two 4K-logical-device harness bugs.
-
 ### Declustered rebuild (wide pools)
 
-For **wide** pools, the big rebuild win comes from `--layout=declustered`: a
-narrow `k+m` stripe is scattered over the whole disk pool with a **distributed
-spare**, so a failed member is reconstructed across *every* survivor at once
-instead of funnelling through one replacement. On real NVMe, rebuilding a failed
-16 GB member on an **80-disk pool (g=13, i.e. 11+2)** took **44.9 s** vs
-**785.1 s** for a classic 78+2 array — **17.5×** — and the array is never fully
-degraded during it. That follows from *where the rebuild I/O lands*: a classic
-rebuild funnels every reconstructed byte onto the one spare, while declustered
-spreads it across the pool. Per-disk I/O counters
+The rebuild win comes from `--layout=declustered`, and its I/O spread grows with
+the pool: a narrow `k+m` stripe is scattered over the whole disk pool with a
+**distributed spare**, so a failed member is reconstructed across *every*
+survivor at once instead of funnelling through one replacement, and the array
+is never fully degraded during it.  In the 2026-11-13 run above, a 12-disk
+declustered pool rebuilt 1.65× faster than tuned stock when idle; no wider pool
+has been timed against the current release.  The gain follows from *where the
+rebuild I/O lands*: a classic rebuild funnels every reconstructed byte onto the
+one spare, while declustered spreads it across the pool.  Per-disk I/O counters
 (`md-kmec/tools/raidkm-bench-declustered-rebuild-load.sh`, device-count-
 independent) show the busiest disk's rebuild write drop by **14×/42×/85×** at
 N=14/42/80 (≈ pool width), and copy-from-spare reads **5×/9×/13×** fewer survivor
-bytes than a decode rebuild (≈ group width − 1). A three-way wall-clock run
-(`raidkm-standard-benchmark.sh --rebuild-victim`) reproduces the win end-to-end —
-**2.05× at N=14, 15.8× at N=80** — and confirms the declustered code adds **no
-overhead to the classic path** (a classic array rebuilds and benchmarks the same
-on the current build as on the pre-declustered build). Adding the replacement later
+bytes than a decode rebuild (≈ group width − 1). Adding the replacement later
 migrates the data back by that parallel **copy-from-spare** (no decode, no
 degraded window). **Native checksums compose** with declustering — the CRC
 region stacks after the on-disk geometry block, CRCs are keyed by physical disk
 (so spare-redirected reads still verify), and the copy-from-spare rebalance
-migrates each block's CRC with the bytes. Full mechanism, the scaling table,
+migrates each block's CRC with the bytes. Full mechanism, the counter table,
 create syntax, and `rk_dcl_populate` / auto-rebuild usage:
 [`md-kmec/README.md`](../md-kmec/README.md#declustered-parity).
 
@@ -592,7 +543,8 @@ from-tree mdadm:
 | `raidkm-test-degraded.sh`, `raidkm-test-replace.sh` | degraded reads, failed-leg replace |
 | `raidkm-test-selfheal.sh` | checksum-driven self-healing — reconstruct silent corruption from parity, to m=8 (`NATIVE=1` = built-in checksums; default stacks `dm-integrity`, needs `integritysetup`) |
 | `raidkm-test-csum-thrash.sh` | native-checksum region-cache eviction round-trip (no false mismatch / no lost CRC under cache pressure; `NATIVE=1`) |
-| `raidkm-test-ci.sh` | CI entry point — `--tier=smoke` (functional/degraded; the row layer: degraded read, native checksum, rebuild under load, replace, wide rows, full-row writes, resync/check/repair through `rk_row_sync`; declustered population and degraded; scrub with bad blocks, trust-disk, the tunables; the row state map and native snapshots: `rowmap`, `snap`, `snap-persist`; ~21 min for 18 suites on the CI VM, measured at this pin), `quick` (adds the stripe-path rebuild), `full` (`--allow-stop-all`, disposable hosts only), `nightly` (quick + the three independent-tool suites below; debug kernel, `--allow-stop-all`); a suite whose kernel or host lacks what it needs — or whose device count the rig cannot meet — reports `skip` with the reason, and a single check whose premise the hardware denies (a sub-block read on a 4 KiB-logical member) is counted as skipped rather than failed, with the count in the suite's note; a tier in which *every* suite skipped fails, so a mis-specified rig cannot pass by testing nothing; one exit status, `summary.txt`, JUnit `results.xml`, per suite `<suite>.log`, `<suite>.dmesg` (its whole kernel log) and `<suite>.tail.dmesg` (what the suite did not clear itself, the log the verdict scans), and each real member's size and block sizes in `env.txt`; refuses a host with other active md arrays. |
+| `raidkm-test-ci.sh` | CI entry point — `--tier=smoke` (functional/degraded; the row layer: degraded read, native checksum, rebuild under load, replace, wide rows, full-row writes, resync/check/repair through `rk_row_sync`; declustered population and degraded; scrub with bad blocks, trust-disk, the tunables; the row state map and native snapshots: `rowmap`, `snap`, `snap-persist`; the fast decode paths, `fast-decode`; 19 suites, ~24 min for the whole CI job, setup included, at this pin), `quick` (adds the stripe-path rebuild), `full` (`--allow-stop-all`, disposable hosts only), `nightly` (quick + the three independent-tool suites below; debug kernel, `--allow-stop-all`); a suite whose kernel or host lacks what it needs — or whose device count the rig cannot meet — reports `skip` with the reason, and a single check whose premise the hardware denies (a sub-block read on a 4 KiB-logical member) is counted as skipped rather than failed, with the count in the suite's note; a tier in which *every* suite skipped fails, so a mis-specified rig cannot pass by testing nothing; one exit status, `summary.txt`, JUnit `results.xml`, per suite `<suite>.log`, `<suite>.dmesg` (its whole kernel log) and `<suite>.tail.dmesg` (what the suite did not clear itself, the log the verdict scans), and each real member's size and block sizes in `env.txt`; refuses a host with other active md arrays. |
+| `raidkm-test-fast-decode.sh` | fast decode (`fast_decode=1`, so it runs on GFNI hosts too) — which path each degraded read, rebuild and declustered population took (XOR, `gen_syndrome` or GF table), asserted from the `decode_xor` / `decode_syndrome` / `decode_gf` counters, with the data and a clean scrub checked; m=2 to m=4, rotating, parity-last and declustered, including a declustered group of width 3 (k=1, m=2) |
 | `raidkm-test-faultinject.sh`, `raidkm-test-xfstests.sh`, `raidkm-test-mdadm-suite.sh` | nightly tier — the kernel's own fault injection (member I/O errors, allocation failures, I/O timeouts) under fsx/fsstress on ext4; xfstests on ext4 over raidkm healthy and degraded (`XFSTESTS_DIR`); mdadm's own raid6 tests adapted to raidkm (stops every array and detaches every loop device) |
 | `raidkm-test-row-dread-wide.sh`, `raidkm-test-row-csum.sh` | row layer — a degraded span read once per row (unaligned spans, two failures, races, declustered), and native checksum verified and published through the row paths (poisoned survivors must be refused) |
 | `raidkm-test-declustered-*.sh` | declustered parity — map/create, populate (rebuild into distributed spare), rebalance (copy-from-spare), sequential multi-assignment, auto-arm, native-checksum composition (`-csum`, incl. copy CRC migration), dm-flakey crash matrices, and the row layer across spare-assignment transitions (off while POPULATING/COPYING, live while steady and degraded, data intact across a rebalance) |
